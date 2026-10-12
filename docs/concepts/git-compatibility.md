@@ -29,8 +29,8 @@ Conventions that hold everywhere:
 | none | `pyn lock`, `pyn unlock`, `pyn locks`, `pyn policy` | pyn only | Leased locks and per-path modes. |
 | none | `pyn login`, `logout`, `register`, `whoami`, `token`, `key`, `invite`, `user`, `member`, `role`, `org`, `team`, `repo`, `admin`, `setup`, `usage`, `summary` | pyn only | Server, account and access administration. |
 | `git init` | none | unsupported | Repositories are created on the server (`pyn repo create`) and cloned. |
-| `git diff` | none | unsupported | Not yet; tracked separately. |
-| `git show` | none | unsupported | Not yet. `pyn get` covers file content. |
+| `git diff [<c1> [<c2>]] [-- <path>...]` | `pyn diff` | different | Unified output, `-U<n>`, `--stat`, `--name-only`, `--name-status`, `--exit-code`, `-q`. Commits are `cN`, `HEAD`, `HEAD~N`. No staging area, so `--cached` and `--staged` fail with a message. See commits.md. |
+| `git show [<commit>]` | `pyn show [<commit>]` | different | Header, message and the commit's diff, with the diff format flags. File content at a revision is `pyn get`. |
 | `git branch`, `git switch`, `git checkout`, `git merge`, `git tag`, `git stash` | none | unsupported | Phase 1 has a single mainline. `checkout` stays reserved for git's meaning. |
 | `git push`, `git remote` | none | unsupported | Check-in goes straight to the server; there is one remote, set by `--server` and `--repo`. |
 | `git reset`, `git rm`, `git mv`, `git rebase`, `git cherry-pick`, `git revert`, `git grep`, `git clean` | none | unsupported | Not planned for the first scope. |

@@ -49,7 +49,7 @@ Over HTTP a client can send a large file as chunks (decision #76: plain HTTP, no
    `PUT .../objects` instead and get their blob id.
 4. `POST .../objects/assemble` with the ordered chunk digests. The server sums the chunk lengths for the blob header,
    reads the chunks, computes the blob id of their concatenation (the client cannot claim one), stores the manifest, and
-   returns that id to use in a checkin. The CLI also hashes the file itself while cutting it and checks the two agree.
+   returns that id to use in a commit. The CLI also hashes the file itself while cutting it and checks the two agree.
 
 Repeating the sequence after a failure uploads only what is still missing. `GET .../content` sends `X-Pyn-Content` (the
 content's blob id) and honours `Range`, so the CLI downloads through a `.pyn-part` file, continues a partial one with a `Range`

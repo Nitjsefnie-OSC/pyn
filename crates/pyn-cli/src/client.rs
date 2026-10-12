@@ -10,6 +10,8 @@ pub struct Api {
     pub user: Option<String>,
     /// `owner/name` of the repository that repository-scoped commands act on.
     pub repo: Option<String>,
+    /// The branch the workspace is on; reads and commits go to it, and the server's default branch when `None`.
+    pub branch: Option<String>,
     /// The working directory is a git repository, so no workspace can name the repository.
     pub on_git: bool,
 }
@@ -47,6 +49,14 @@ impl Api {
         self.request(Method::GET, path)
     }
 
+    /// `req` limited to the workspace's branch.
+    pub fn on_branch(&self, req: RequestBuilder) -> RequestBuilder {
+        match &self.branch {
+            Some(b) => req.query(&[("branch", b)]),
+            None => req,
+        }
+    }
+
     pub fn send(&self, req: RequestBuilder) -> Result<Response> {
         ok(req.send()?)
     }
@@ -56,7 +66,7 @@ impl Api {
         let mut all = Vec::new();
         let mut after: Option<String> = None;
         loop {
-            let mut req = self.get(&self.repo_route("/files")?);
+            let mut req = self.on_branch(self.get(&self.repo_route("/files")?));
             if let Some(a) = &after {
                 req = req.query(&[("after", a)]);
             }

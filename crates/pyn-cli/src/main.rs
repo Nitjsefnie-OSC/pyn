@@ -10,6 +10,7 @@ use reqwest::blocking::Client;
 mod address;
 mod admin;
 mod backend;
+mod branch;
 mod client;
 mod credentials;
 mod diff;
@@ -101,6 +102,12 @@ enum Command {
     /// Create and manage an organization's teams, and grant them roles on its repositories.
     #[command(subcommand)]
     Team(TeamCommand),
+    /// List, create, rename or delete branches.
+    Branch(branch::BranchArgs),
+    /// Switch the workspace to another branch.
+    Switch(branch::SwitchArgs),
+    /// Switch branches, or restore files from the workspace's revisions or from another commit (`pyn lock` takes a lock).
+    Checkout(branch::CheckoutArgs),
     /// Show what differs between this workspace and the server.
     Status {
         /// Compare with the repository as of this commit (`HEAD~N`, a commit hash) instead of the newest.
@@ -849,6 +856,7 @@ fn run(cli: Cli) -> Result<()> {
         token,
         user: resolve(cli.user, mine.user.as_ref(), yours.user.as_ref(), None),
         repo,
+        branch: branch::current(ws.as_ref()),
         on_git,
     });
     let rp = |p: &str| -> Result<String> {
@@ -1172,11 +1180,18 @@ fn run(cli: Cli) -> Result<()> {
                 .transpose()?;
             sync::clone_into(&backend, &target, &server, &repo, commit.as_deref())?;
         }
+        Command::Branch(args) => branch::branch_command(&backend, ws.as_ref(), args)?,
+        Command::Switch(args) => branch::switch_command(&backend, ws.as_ref(), args)?,
+        Command::Checkout(args) => {
+            branch::checkout_command(&backend, ws.as_ref(), &cwd, args, &rp)?
+        }
         Command::Status { revision } => {
+            let w = in_workspace("status")?;
+            branch::print_header(Some(w));
             let commit = revision
                 .map(|r| snapshot::resolve(&backend, &r))
                 .transpose()?;
-            sync::status(&backend, in_workspace("status")?, commit.as_deref())?
+            sync::status(&backend, w, commit.as_deref())?
         }
         Command::Update { paths, revision } => {
             let only = paths.iter().map(|p| rp(p)).collect::<Result<Vec<_>>>()?;
@@ -1322,7 +1337,11 @@ fn run(cli: Cli) -> Result<()> {
                 });
                 hashes.push((path, hash, file_mode));
             }
-            let body = api::ChangesetRequest { entries, message };
+            let body = api::ChangesetRequest {
+                entries,
+                message,
+                branch: None,
+            };
             let r = backend
                 .commit_changeset(&body)
                 .map_err(|e| behind_hint(e, true))?;
@@ -1359,6 +1378,7 @@ fn run(cli: Cli) -> Result<()> {
                 file_mode: Some(file_mode),
                 base_revision: base.or(known),
                 message,
+                branch: None,
             };
             let r = backend
                 .commit_file(&body)
@@ -1388,6 +1408,7 @@ fn run(cli: Cli) -> Result<()> {
             limit,
             ..
         } => {
+            branch::note_branch(ws.as_ref());
             let limit = limit.unwrap_or(50);
             let mut rows: Vec<Vec<String>> = Vec::new();
             let mut before: Option<String> = None;
@@ -1419,6 +1440,7 @@ fn run(cli: Cli) -> Result<()> {
             limit,
             ..
         } => {
+            branch::note_branch(ws.as_ref());
             let (revs, repo_wide) = match path {
                 Some(path) => {
                     let revs = backend.path_history(&rp(&path)?)?.into_iter().rev();
@@ -1837,6 +1859,7 @@ fn restore(
         base_revision: head.id,
         confirm: format!("{path}@r{}", head.id),
         message,
+        branch: None,
     };
     let r = backend.restore(&body)?;
     println!(
@@ -1864,6 +1887,7 @@ fn submit_policy(api: &Api, repo: &str, bytes: Vec<u8>) -> Result<()> {
         file_mode: None,
         base_revision: None,
         message: "Initial policy".into(),
+        branch: None,
     };
     api.send(
         api.request(Method::POST, &format!("{repo}/checkin"))

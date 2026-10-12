@@ -65,10 +65,12 @@ pub fn run(command: Command, git: &GitHome, cwd: &Path) -> Result<()> {
         Command::Init => init(git),
         Command::Files => crate::files_command(git),
         Command::Ls { path } => crate::ls_command(git, path.as_deref()),
-        Command::Merge(_) => refuse("merge"),
-        Command::Branch(_) => refuse("branch"),
-        Command::Switch(_) => refuse("switch"),
-        Command::Checkout(_) => refuse("checkout"),
+        Command::Merge(args) => super::merge::merge(git, args),
+        Command::Branch(args) => super::branches::branch(git, args),
+        Command::Switch(args) => super::switch::switch(git, args),
+        Command::Checkout(args) => super::switch::checkout(git, cwd, args),
+        Command::Tag(args) => super::tags::tag(git, args),
+        Command::Stash(args) => super::stash::stash(git, args),
         Command::Add {
             paths,
             update,
@@ -111,9 +113,16 @@ pub fn run(command: Command, git: &GitHome, cwd: &Path) -> Result<()> {
             args,
             source,
             staged: true,
+            worktree: false,
             ..
         } => stage::restore_staged(git, cwd, &args, source.as_deref()),
-        Command::Restore { .. } => refuse("restore"),
+        Command::Restore {
+            args,
+            source,
+            staged,
+            worktree,
+            ..
+        } => super::switch::restore(git, cwd, &args, source.as_deref(), staged, worktree),
         Command::Update { .. } => refuse("update"),
         Command::Get { .. } => refuse("get"),
         Command::Locks { .. } => server_only("locks"),
@@ -176,7 +185,7 @@ fn short(id: &ObjectId) -> String {
     id.to_hex()[..ABBREV].to_string()
 }
 
-fn status(git: &GitHome) -> Result<()> {
+pub(super) fn status(git: &GitHome) -> Result<()> {
     let status = git.repo.status()?;
     let line = match &status.head {
         Head::Branch { name, id: Some(_) } => format!("On branch {name}"),

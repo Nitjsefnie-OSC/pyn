@@ -112,6 +112,10 @@ enum Command {
     Checkout(branch::CheckoutArgs),
     /// Merge a branch into the current branch.
     Merge(merging::MergeArgs),
+    /// Create, list and delete tags (a git repository only).
+    Tag(git_home::TagArgs),
+    /// Save, list and restore local changes (a git repository only).
+    Stash(git_home::StashArgs),
     /// Show what differs between this workspace and the server.
     Status {
         /// Compare with the repository as of this commit (`HEAD~N`, a commit hash) instead of the newest.
@@ -257,6 +261,9 @@ enum Command {
         /// Unstage the paths instead: put the staged changes back to the last commit.
         #[arg(short = 'S', long)]
         staged: bool,
+        /// Restore the work tree files (with --staged, both); a git repository only.
+        #[arg(short = 'W', long)]
+        worktree: bool,
         #[arg(short, long)]
         message: Option<String>,
         /// Skip the typed confirmation.
@@ -735,6 +742,10 @@ fn main() {
         std::process::exit(1);
     }
     if let Err(e) = run(cli) {
+        if let Some(refused) = e.downcast_ref::<git_home::Refused>() {
+            eprintln!("error: {refused}");
+            std::process::exit(1);
+        }
         eprintln!("fatal: {e:#}");
         std::process::exit(128);
     }
@@ -789,17 +800,18 @@ fn runs_anywhere(command: &Command) -> bool {
 
 fn run(cli: Cli) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    if let Command::Commit { message, .. } = &cli.command
-        && message.is_empty()
-        && !Workspace::discover(&cwd).is_some_and(|w| merging::in_progress(&w))
-    {
-        usage_error("the following required arguments were not provided:\n  --message <MESSAGE>");
-    }
     let git = if matches!(cli.command, Command::Clone { .. } | Command::Config(_)) {
         None
     } else {
         git_home::detect(&cwd)?
     };
+    if let Command::Commit { message, .. } = &cli.command
+        && message.is_empty()
+        && git.is_none()
+        && !Workspace::discover(&cwd).is_some_and(|w| merging::in_progress(&w))
+    {
+        usage_error("the following required arguments were not provided:\n  --message <MESSAGE>");
+    }
     if let Some(git) = &git
         && !runs_anywhere(&cli.command)
     {
@@ -1200,6 +1212,14 @@ fn run(cli: Cli) -> Result<()> {
                 .transpose()?;
             sync::clone_into(&backend, &target, &server, &repo, commit.as_deref())?;
         }
+        Command::Tag(_) => {
+            eprintln!("{}", unsupported::message("tag"));
+            std::process::exit(1);
+        }
+        Command::Stash(_) => {
+            eprintln!("{}", unsupported::message("stash"));
+            std::process::exit(1);
+        }
         Command::Merge(args) => merging::merge_command(&backend, ws.as_ref(), args)?,
         Command::Branch(args) => branch::branch_command(&backend, ws.as_ref(), args)?,
         Command::Switch(args) => branch::switch_command(&backend, ws.as_ref(), args)?,
@@ -1529,6 +1549,9 @@ fn run(cli: Cli) -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Command::Restore { worktree: true, .. } => usage_error(
+            "`restore --worktree` needs a git repository; on a pyn server a restore makes an older revision the new head",
+        ),
         Command::Restore {
             args,
             source,

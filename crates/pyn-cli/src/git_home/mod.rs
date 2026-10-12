@@ -1,8 +1,18 @@
 //! The backend for a repository that lives in git: a real `.git` read through `pyn-gitwork`, never written.
 //! Nothing here changes what git sees; the only file pyn adds is its own `.pyn/` folder, hidden by `info/exclude`.
 
+mod ancestry;
+mod branches;
 mod commands;
+mod convert;
+mod merge;
+mod refwrite;
 mod stage;
+mod stash;
+mod switch;
+mod tags;
+mod treemerge;
+mod worktree;
 
 use std::path::{Path, PathBuf};
 
@@ -16,6 +26,20 @@ use crate::backend::Backend;
 use crate::workspace::{self, Workspace};
 
 pub use commands::run;
+pub use stash::StashArgs;
+pub use tags::TagArgs;
+
+/// A refusal git reports as `error: <message>` with exit status 1, rather than as a fatal error.
+#[derive(Debug)]
+pub struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
 
 pub struct GitHome {
     repo: Repo,

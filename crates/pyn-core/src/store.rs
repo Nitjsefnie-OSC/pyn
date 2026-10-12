@@ -5,6 +5,7 @@ use crate::branch::{Branch, DEFAULT_BRANCH};
 use crate::error::Result;
 use crate::history::HistoryCursor;
 use crate::limits::{RepoUsage, StorageCap, Usage};
+use crate::merge::{MergeWrite, MergeWritten};
 use crate::repo::{RepoRecord, RepoUpdate};
 use crate::rules::PathFilter;
 use pyn_object::ObjectId;
@@ -125,6 +126,32 @@ pub trait MetadataStore: Send + Sync {
         now: DateTime<Utc>,
         cap: Option<StorageCap>,
     ) -> Result<Vec<Revision>>;
+
+    /// Writes a merge commit on `branch` or nothing: its parents are the head, which must be `expected_head`
+    /// (`MergeStale` otherwise), and `other`. Adopted and new revisions go in its tree and become the paths' pointers.
+    async fn commit_merge_on(
+        &self,
+        repo: &RepoId,
+        branch: &str,
+        merge: MergeWrite,
+        now: DateTime<Utc>,
+        cap: Option<StorageCap>,
+    ) -> Result<MergeWritten>;
+
+    /// Moves `branch` from `from` to `to`, a descendant of it: no new commit. `MergeStale` if the branch is no
+    /// longer at `from`.
+    async fn fast_forward_branch(
+        &self,
+        repo: &RepoId,
+        branch: &str,
+        from: Option<&ObjectId>,
+        to: &ObjectId,
+    ) -> Result<()>;
+
+    /// The lowest common ancestors of `a` and `b` through every parent: their common ancestors (each commit counts
+    /// as its own ancestor) that no other common ancestor descends from, ordered by id.
+    async fn merge_bases(&self, repo: &RepoId, a: &ObjectId, b: &ObjectId)
+    -> Result<Vec<ObjectId>>;
 
     /// The branches of the repository, the default one first, then by name.
     async fn list_branches(&self, repo: &RepoId) -> Result<Vec<Branch>>;

@@ -24,8 +24,8 @@ use crate::{
 };
 use crate::{
     AuditAction, AuditQuery, AuditScope, AuditStore, ChangeEntry, FileMode, ManualClock,
-    MetadataStore, ObjectId, ObjectStore, PynError, RepoId, RepoPath, RepoRecord, RepoService,
-    RepoSettings, RepoUpdate, RevisionId, Rules, ServiceConfig, UserId, Visibility,
+    MetadataStore, ObjectId, PynError, RepoId, RepoPath, RepoRecord, RepoService, RepoSettings,
+    RepoUpdate, RevisionId, Rules, ServiceConfig, UserId, Visibility,
 };
 
 pub type Store = Arc<dyn MetadataStore>;
@@ -49,6 +49,8 @@ mod deletion;
 pub use deletion::*;
 mod push_merge;
 pub use push_merge::*;
+mod uploads;
+pub use uploads::*;
 
 struct Harness {
     store: Store,
@@ -63,13 +65,21 @@ fn harness(store: Store) -> Harness {
 }
 
 fn harness_with(store: Store, rules: &str) -> Harness {
-    let objects = Arc::new(MemoryObjectStore::new());
+    harness_on(
+        store,
+        Arc::new(MemoryObjectStore::new()),
+        RepoId::new("game"),
+        rules,
+    )
+}
+
+fn harness_on(store: Store, objects: Arc<MemoryObjectStore>, repo: RepoId, rules: &str) -> Harness {
     let audit = Arc::new(MemoryAuditStore::new());
     let clock = Arc::new(ManualClock::new(
         Utc.with_ymd_and_hms(2026, 10, 8, 9, 0, 0).unwrap(),
     ));
     let svc = Arc::new(RepoService::new(
-        RepoId::new("game"),
+        repo,
         Rules::from_toml(rules).unwrap(),
         store.clone(),
         objects.clone(),
@@ -86,6 +96,15 @@ fn harness_with(store: Store, rules: &str) -> Harness {
     }
 }
 
+fn other_repo(h: &Harness) -> Harness {
+    harness_on(
+        h.store.clone(),
+        h.objects.clone(),
+        RepoId::new("other"),
+        RULES,
+    )
+}
+
 fn path(s: &str) -> RepoPath {
     RepoPath::new(s).unwrap()
 }
@@ -99,7 +118,7 @@ fn who(s: &str) -> Principal {
 }
 
 async fn blob(h: &Harness, s: &str) -> ObjectId {
-    h.objects.put(s.as_bytes().to_vec()).await.unwrap()
+    h.svc.upload_blob(s.as_bytes().to_vec()).await.unwrap()
 }
 
 pub async fn second_user_cannot_take_a_held_lock(store: Store) {
@@ -1500,7 +1519,7 @@ pub async fn deleting_a_repository_removes_only_its_own_data(store: Store) {
     let map = path("Content/Dungeon.umap");
     for svc in [&h.svc, &other] {
         svc.checkout(&map, &user("alice"), None).await.unwrap();
-        let c = blob(&h, "one").await;
+        let c = svc.upload_blob(b"one".to_vec()).await.unwrap();
         svc.checkin(&who("alice"), &map, c, None, "first".into())
             .await
             .unwrap();
@@ -1643,11 +1662,13 @@ pub async fn usage_counts_distinct_content_once_per_repository(store: Store) {
         "old revisions keep their content"
     );
 
+    let five = other.upload_blob(b"12345".to_vec()).await.unwrap();
     other
         .checkin(&who("alice"), &a, five, None, "a".into())
         .await
         .unwrap();
     let theirs = service_in(&store, &h, "theirs");
+    let three = theirs.upload_blob(b"123".to_vec()).await.unwrap();
     theirs
         .checkin(&who("bob"), &a, three, None, "a".into())
         .await
@@ -2237,7 +2258,7 @@ pub async fn checkin_past_the_storage_cap_is_refused_unless_it_adds_nothing(stor
         .checkin(
             &who("alice"),
             &b,
-            blob(&h, "abcdef").await,
+            game.upload_blob(b"abcdef".to_vec()).await.unwrap(),
             None,
             "b".into(),
         )
@@ -2263,7 +2284,13 @@ pub async fn checkin_past_the_storage_cap_is_refused_unless_it_adds_nothing(stor
         .await
         .unwrap();
     let err = other
-        .checkin(&who("alice"), &a, blob(&h, "abcde").await, None, "c".into())
+        .checkin(
+            &who("alice"),
+            &a,
+            other.upload_blob(b"abcde".to_vec()).await.unwrap(),
+            None,
+            "c".into(),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -2274,7 +2301,7 @@ pub async fn checkin_past_the_storage_cap_is_refused_unless_it_adds_nothing(stor
         .checkin(
             &who("alice"),
             &a,
-            blob(&h, "abcd").await,
+            other.upload_blob(b"abcd".to_vec()).await.unwrap(),
             None,
             "fits".into(),
         )
@@ -3208,6 +3235,12 @@ macro_rules! contract_tests {
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_push_past_the_storage_cap_applies_nothing);
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; racing_pushes_to_one_branch_have_exactly_one_winner);
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_blob_is_read_by_id_only_when_a_revision_of_the_repository_names_it);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; an_object_is_usable_only_by_the_repository_that_uploaded_it);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; uploads_are_reported_missing_per_repository_and_dedup_in_the_store);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_push_needs_its_blobs_uploaded_to_the_repository);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_merge_resolution_needs_content_the_repository_knows);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; assembling_needs_chunks_the_repository_uploaded);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; unreferenced_uploads_are_capped_per_repository);
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_full_fetch_lists_every_commit_oldest_first_with_the_trees_each_adds);
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; haves_leave_out_what_the_client_has_and_unknown_haves_are_ignored);
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_fetch_pages_by_cursor_over_the_heads_it_started_with);
@@ -3878,6 +3911,41 @@ impl MetadataStore for HookedMeta {
 
     async fn has_content(&self, repo: &RepoId, content: &ObjectId) -> crate::Result<bool> {
         self.inner.has_content(repo, content).await
+    }
+
+    async fn record_upload(
+        &self,
+        repo: &RepoId,
+        id: &ObjectId,
+        size: u64,
+        cap: u64,
+    ) -> crate::Result<()> {
+        self.inner.record_upload(repo, id, size, cap).await
+    }
+
+    async fn record_assembled(
+        &self,
+        repo: &RepoId,
+        id: &ObjectId,
+        size: u64,
+        chunks: &[ObjectId],
+        cap: u64,
+    ) -> crate::Result<()> {
+        self.inner
+            .record_assembled(repo, id, size, chunks, cap)
+            .await
+    }
+
+    async fn unknown_objects(
+        &self,
+        repo: &RepoId,
+        ids: &[ObjectId],
+    ) -> crate::Result<Vec<ObjectId>> {
+        self.inner.unknown_objects(repo, ids).await
+    }
+
+    async fn unreferenced_bytes(&self, repo: &RepoId) -> crate::Result<u64> {
+        self.inner.unreferenced_bytes(repo).await
     }
 
     async fn get_tree(&self, repo: &RepoId, id: &ObjectId) -> crate::Result<Option<Vec<u8>>> {

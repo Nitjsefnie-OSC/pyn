@@ -537,6 +537,51 @@ async fn next_commit(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, repo: &Repo
 }
 
 /// Bytes of distinct content across the owner's repositories.
+async fn unreferenced<'e>(
+    exec: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
+    repo: &RepoId,
+) -> Result<i64> {
+    sqlx::query_scalar(
+        "SELECT COALESCE(SUM(o.size), 0)::bigint FROM repo_objects o
+         WHERE o.repo = $1 AND NOT o.assembled
+           AND NOT EXISTS (SELECT 1 FROM revisions r WHERE r.repo = o.repo AND r.content = o.id)",
+    )
+    .bind(repo.as_str())
+    .fetch_one(exec)
+    .await
+    .map_err(db)
+}
+
+async fn insert_upload(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    repo: &RepoId,
+    id: &ObjectId,
+    size: u64,
+    cap: u64,
+) -> Result<()> {
+    let inserted = sqlx::query(
+        "INSERT INTO repo_objects (repo, id, size) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+    )
+    .bind(repo.as_str())
+    .bind(id.to_hex())
+    .bind(size as i64)
+    .execute(&mut **tx)
+    .await
+    .map_err(db)?
+    .rows_affected();
+    if inserted == 1 {
+        let used = unreferenced(&mut **tx, repo).await? as u64;
+        if used > cap {
+            return Err(PynError::StorageLimitReached {
+                owner: repo.to_string(),
+                limit: cap,
+                used: used - size,
+            });
+        }
+    }
+    Ok(())
+}
+
 async fn owner_stored(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     owner: &UserId,
@@ -1647,6 +1692,69 @@ impl MetadataStore for PgMetadataStore {
         .map_err(db)
     }
 
+    async fn record_upload(&self, repo: &RepoId, id: &ObjectId, size: u64, cap: u64) -> Result<()> {
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        insert_upload(&mut tx, repo, id, size, cap).await?;
+        tx.commit().await.map_err(db)
+    }
+
+    async fn record_assembled(
+        &self,
+        repo: &RepoId,
+        id: &ObjectId,
+        size: u64,
+        chunks: &[ObjectId],
+        cap: u64,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        let hex: Vec<String> = chunks.iter().map(|c| c.to_hex()).collect();
+        let known: Vec<String> = sqlx::query_scalar(
+            "SELECT c FROM unnest($2::text[]) AS c WHERE EXISTS
+                 (SELECT 1 FROM repo_objects WHERE repo = $1 AND id = c)
+              OR EXISTS (SELECT 1 FROM revisions WHERE repo = $1 AND content = c)",
+        )
+        .bind(repo.as_str())
+        .bind(&hex)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db)?;
+        if let Some(c) = hex.iter().find(|c| !known.contains(c)) {
+            return Err(PynError::ObjectMissing(c.clone()));
+        }
+        sqlx::query("UPDATE repo_objects SET assembled = true WHERE repo = $1 AND id = ANY($2)")
+            .bind(repo.as_str())
+            .bind(&hex)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+        insert_upload(&mut tx, repo, id, size, cap).await?;
+        tx.commit().await.map_err(db)
+    }
+
+    async fn unknown_objects(&self, repo: &RepoId, ids: &[ObjectId]) -> Result<Vec<ObjectId>> {
+        let hex: Vec<String> = ids.iter().map(|c| c.to_hex()).collect();
+        let known: Vec<String> = sqlx::query_scalar(
+            "SELECT c FROM unnest($2::text[]) AS c WHERE EXISTS
+                 (SELECT 1 FROM repo_objects WHERE repo = $1 AND id = c)
+              OR EXISTS (SELECT 1 FROM revisions WHERE repo = $1 AND content = c)",
+        )
+        .bind(repo.as_str())
+        .bind(&hex)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(ids
+            .iter()
+            .zip(&hex)
+            .filter(|(_, h)| !known.contains(h))
+            .map(|(id, _)| *id)
+            .collect())
+    }
+
+    async fn unreferenced_bytes(&self, repo: &RepoId) -> Result<u64> {
+        Ok(unreferenced(&self.pool, repo).await? as u64)
+    }
+
     async fn get_tree(&self, repo: &RepoId, id: &ObjectId) -> Result<Option<Vec<u8>>> {
         sqlx::query_scalar("SELECT body FROM trees WHERE repo = $1 AND id = $2")
             .bind(repo.as_str())
@@ -1946,6 +2054,7 @@ impl MetadataStore for PgMetadataStore {
             "DELETE FROM commit_pointers WHERE repo = $1",
             "DELETE FROM branches WHERE repo = $1",
             "DELETE FROM trees WHERE repo = $1",
+            "DELETE FROM repo_objects WHERE repo = $1",
         ] {
             sqlx::query(stmt)
                 .bind(id.as_str())
@@ -2095,6 +2204,34 @@ mod tests {
             let c = store.get_commit(&repo, &id).await.unwrap().unwrap();
             c.verify().unwrap();
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs PYN_DATABASE_URL"]
+    async fn existing_revisions_seed_the_per_repository_object_record() {
+        let url = std::env::var("PYN_DATABASE_URL").expect("PYN_DATABASE_URL must be set");
+        let store = PgMetadataStore::connect_in_scratch_schema(&url)
+            .await
+            .unwrap();
+        for stmt in [
+            "DROP TABLE repo_objects",
+            "DELETE FROM _sqlx_migrations WHERE version = 34",
+            "INSERT INTO revisions (repo, path, id, content, author, message, created_at, size, hash_version, commit_no) VALUES
+               ('r', 'a', 1, repeat('1', 64), 'u', 'm', now(), 5, 1, 1),
+               ('r', 'b', 1, repeat('1', 64), 'u', 'm', now(), 5, 1, 2),
+               ('r', 'c', 1, repeat('2', 64), 'u', 'm', now(), 7, 1, 3)",
+        ] {
+            sqlx::query(stmt).execute(&store.pool).await.unwrap();
+        }
+        migrate(&store).await;
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT id, size FROM repo_objects WHERE repo = 'r' ORDER BY id")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, [("1".repeat(64), 5), ("2".repeat(64), 7)]);
+        let repo = RepoId::new("r");
+        assert_eq!(store.unreferenced_bytes(&repo).await.unwrap(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2389,8 +2526,7 @@ mod tests {
     async fn verify_finds_a_tampered_base_on_a_branch() {
         use pyn_core::memory::{MemoryAuditStore, MemoryObjectStore};
         use pyn_core::{
-            BreakKind, FileMode, ManualClock, ObjectStore, Principal, RepoService, Rules,
-            ServiceConfig, UserId,
+            BreakKind, FileMode, ManualClock, Principal, RepoService, Rules, ServiceConfig, UserId,
         };
         use std::sync::Arc;
 
@@ -2413,13 +2549,13 @@ mod tests {
         let who = Principal::unrestricted(UserId::new("alice"));
         let path = RepoPath::new("Content/a.umap").unwrap();
         let put = |branch: &'static str, text: &'static str, base: Option<u64>| {
-            let (svc, objects, who, path) = (&svc, &objects, &who, &path);
+            let (svc, who, path) = (&svc, &who, &path);
             async move {
                 let base = base.map(RevisionId);
                 svc.checkout_on(branch, path, &who.user, base)
                     .await
                     .unwrap();
-                let c = objects.put(text.as_bytes().to_vec()).await.unwrap();
+                let c = svc.upload_blob(text.as_bytes().to_vec()).await.unwrap();
                 svc.checkin_on(branch, who, path, c, FileMode::Regular, base, text.into())
                     .await
                     .unwrap();

@@ -26,6 +26,7 @@ use crate::repo_policy::{
     CreationEffect, CreationRule, CreationScope, CreationSubject, MemberCreation, RepoPolicy,
 };
 use crate::store::MetadataStore;
+use crate::types::{MAX_LABEL_BYTES, validate_label};
 use crate::types::{RepoId, UserId};
 
 /// Server-wide events (account approvals and disables) are recorded in the audit store under this id, which
@@ -474,6 +475,8 @@ pub(crate) fn bounded_key(part: &str) -> String {
     }
 }
 
+/// Longest an invitation can be valid, in hours (one year).
+pub const MAX_INVITE_HOURS: i64 = 8760;
 const SIGN_IN_WINDOW: Duration = Duration::minutes(15);
 const REGISTER_WINDOW: Duration = Duration::hours(1);
 const MAIL_WINDOW: Duration = Duration::hours(1);
@@ -971,9 +974,7 @@ impl AccessService {
         expires_at: Option<DateTime<Utc>>,
         sign_in: bool,
     ) -> Result<(TokenRecord, String)> {
-        if name.trim().is_empty() {
-            return Err(PynError::InvalidRequest("a token needs a name".into()));
-        }
+        let name = validate_label("token name", name)?;
         if permissions.is_empty() {
             return Err(PynError::InvalidRequest(
                 "a token needs at least one permission".into(),
@@ -989,7 +990,7 @@ impl AccessService {
         let record = TokenRecord {
             id,
             user: user.clone(),
-            name: name.trim().to_string(),
+            name,
             secret_hash,
             permissions,
             repos,
@@ -1044,13 +1045,46 @@ impl AccessService {
             || self.store.org_role(&record.owner, user).await? == Some(OrgRole::Owner))
     }
 
-    /// The actor's own tokens; another user's need `manage_users` in a repository that user belongs to.
-    pub async fn list_tokens(&self, actor: &Identity, user: &UserId) -> Result<Vec<TokenRecord>> {
-        self.require_manages(actor, user).await?;
-        self.store.list_tokens(user).await
+    /// Whether the actor holds `manage_users` in every repository the token is scoped to; a token for all
+    /// repositories qualifies only for a server admin.
+    async fn manages_token(&self, actor: &Identity, record: &TokenRecord) -> Result<bool> {
+        if self.is_server_admin(actor).await? {
+            return Ok(true);
+        }
+        if record.repos.is_empty() {
+            return Ok(false);
+        }
+        for repo in &record.repos {
+            if !self
+                .role_permissions(repo, &actor.user)
+                .await?
+                .contains(&Permission::ManageUsers)
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
-    /// Revokes the actor's own token; another user's needs `manage_users` in a repository that user belongs to.
+    /// The actor's own tokens. Another user's need `manage_users` in a repository that user belongs to, and only
+    /// the tokens limited to repositories the actor manages are listed.
+    pub async fn list_tokens(&self, actor: &Identity, user: &UserId) -> Result<Vec<TokenRecord>> {
+        self.require_manages(actor, user).await?;
+        let all = self.store.list_tokens(user).await?;
+        if &actor.user == user {
+            return Ok(all);
+        }
+        let mut out = Vec::new();
+        for record in all {
+            if self.manages_token(actor, &record).await? {
+                out.push(record);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Revokes the actor's own token. Another user's needs `manage_users` in every repository the token is
+    /// limited to; any other token of theirs reads as not found.
     pub async fn revoke_token(&self, actor: &Identity, id: &TokenId) -> Result<()> {
         actor.require_full_scope()?;
         let record = self
@@ -1059,6 +1093,9 @@ impl AccessService {
             .await?
             .ok_or_else(|| PynError::TokenNotFound(id.to_string()))?;
         self.require_manages(actor, &record.user).await?;
+        if record.user != actor.user && !self.manages_token(actor, &record).await? {
+            return Err(PynError::TokenNotFound(id.to_string()));
+        }
         self.store.revoke_token(id, self.clock.now()).await?;
         let detail = format!("token {} {:?} of {}", record.id, record.name, record.user);
         for repo in &record.repos {
@@ -1077,6 +1114,54 @@ impl AccessService {
         Ok(())
     }
 
+    /// Whether `actor` is a server admin or an owner of the organization that owns `repo`.
+    pub(super) async fn exempt_from_rank(&self, actor: &Principal, repo: &RepoId) -> Result<bool> {
+        if self
+            .store
+            .account(&actor.user)
+            .await?
+            .is_some_and(|a| a.is_admin)
+        {
+            return Ok(true);
+        }
+        Ok(matches!(
+            self.resolve_role(repo, &actor.user).await?,
+            Some((_, RoleSource::OrgOwner))
+        ))
+    }
+
+    /// A direct role changes only at the hands of someone who holds everything it grants. The account that owns
+    /// a user-owned repository changes only for itself or a server admin.
+    pub(super) async fn require_can_change(
+        &self,
+        actor: &Principal,
+        repo: &RepoId,
+        user: &UserId,
+    ) -> Result<()> {
+        if actor.user == *user || self.exempt_from_rank(actor, repo).await? {
+            return Ok(());
+        }
+        if let Some(registry) = &self.registry
+            && let Some(record) = registry.get_repo(repo).await?
+            && record.owner == *user
+            && !self.is_org(&record.owner).await?
+        {
+            return Err(PynError::Forbidden(Permission::ManageUsers));
+        }
+        if let Some(current) = self.store.role_of(repo, user).await? {
+            let held = self
+                .store
+                .role_definitions(repo)
+                .await?
+                .get(current)
+                .clone();
+            for p in held {
+                actor.require(p)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Adds the user if new and gives them `role`.
     pub async fn set_user_role(
         &self,
@@ -1087,6 +1172,7 @@ impl AccessService {
     ) -> Result<()> {
         actor.require(Permission::ManageUsers)?;
         self.require_can_grant(actor, repo, role).await?;
+        self.require_can_change(actor, repo, user).await?;
         self.require_grantable(repo, user).await?;
         let before = self.store.role_of(repo, user).await?;
         self.store.ensure_user(user, self.clock.now()).await?;
@@ -1635,7 +1721,8 @@ impl AccessService {
         Ok(record)
     }
 
-    /// Adds an account with an initial password, in any registration mode.
+    /// Adds an account with an initial password. Only a server admin may do so unless registration is open
+    /// without approval or email verification; otherwise it is rate limited like sign-up.
     pub async fn add_user(
         &self,
         actor: &Principal,
@@ -1646,6 +1733,28 @@ impl AccessService {
     ) -> Result<UserId> {
         actor.require(Permission::ManageUsers)?;
         self.require_can_grant(actor, repo, role).await?;
+        let by_admin = self
+            .store
+            .account(&actor.user)
+            .await?
+            .is_some_and(|a| a.is_admin);
+        if !by_admin {
+            let open = self.registration_mode() == RegistrationMode::Open
+                && !self.config.require_approval
+                && !self.config.require_email_verification;
+            if !open {
+                return Err(PynError::Forbidden(Permission::ManageUsers));
+            }
+            self.count_limited(
+                &format!(
+                    "register:client:add_user:{}",
+                    bounded_key(actor.user.as_str())
+                ),
+                self.config.limits.register_per_client,
+                REGISTER_WINDOW,
+            )
+            .await?;
+        }
         let user = account::validate_username(username)?;
         account::validate_password(password)?;
         self.require_grantable(repo, &user).await?;
@@ -1718,13 +1827,16 @@ impl AccessService {
                     .into(),
             ));
         }
-        if valid_for <= Duration::zero() {
-            return Err(PynError::InvalidRequest(
-                "an invitation must be valid for some time".into(),
-            ));
+        if valid_for < Duration::hours(1) || valid_for > Duration::hours(MAX_INVITE_HOURS) {
+            return Err(PynError::InvalidRequest(format!(
+                "an invitation is valid for 1 to {MAX_INVITE_HOURS} hours"
+            )));
         }
         let (id, code, secret_hash) = invite::generate()?;
         let now = self.clock.now();
+        let expires_at = now
+            .checked_add_signed(valid_for)
+            .ok_or_else(|| PynError::InvalidRequest("the expiry is out of range".into()))?;
         let record = InviteRecord {
             id,
             secret_hash,
@@ -1732,7 +1844,7 @@ impl AccessService {
             role,
             created_by: actor.user.clone(),
             created_at: now,
-            expires_at: now + valid_for,
+            expires_at,
             used_at: None,
             used_by: None,
             revoked_at: None,
@@ -1792,12 +1904,22 @@ impl AccessService {
     ) -> Result<SshKeyRecord> {
         actor.require_full_scope()?;
         let parsed = ssh::parse(key)?;
-        let title = title
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .map(str::to_string)
-            .or_else(|| (!parsed.comment.is_empty()).then(|| parsed.comment.clone()))
-            .unwrap_or_else(|| parsed.algorithm.clone());
+        let derived = |text: &str| {
+            let mut out = String::new();
+            for c in text.chars().filter(|c| !c.is_control()) {
+                if out.len() + c.len_utf8() > MAX_LABEL_BYTES {
+                    break;
+                }
+                out.push(c);
+            }
+            out.trim().to_string()
+        };
+        let title = match title.map(str::trim).filter(|t| !t.is_empty()) {
+            Some(t) => validate_label("key title", t)?,
+            None => Some(derived(&parsed.comment))
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| parsed.algorithm.clone()),
+        };
         self.store
             .ensure_user(&actor.user, self.clock.now())
             .await?;

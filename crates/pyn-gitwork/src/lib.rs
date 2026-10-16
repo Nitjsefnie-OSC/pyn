@@ -22,4 +22,4 @@ pub use safepath::{
     check_paths,
 };
 pub use status::{Kind, Status, StatusEntry, fs_path, hash_worktree_file, worktree_mode};
-pub use tree::{Change, Entry};
+pub use tree::{Change, Entry, MAX_TREE_DEPTH};

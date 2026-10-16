@@ -7,14 +7,15 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::str::FromStr;
 
+use futures_util::TryStreamExt;
 use pyn_core::branch::{DEFAULT_BRANCH, conflicts};
 use pyn_core::commit_record::{CommitDraft, TreeChange, TreeEdit, draft_commit};
 use pyn_core::merge::{MergeWrite, MergeWritten};
 use pyn_core::{
-    Branch, ChangesetItem, Commit, FileMode, HistoryCursor, Lock, MetadataStore, Mode, ObjectId,
-    PathFilter, Person, PushedCommit, PynError, REPO_ALGORITHM, RepoId, RepoPath, RepoRecord,
-    RepoSettings, RepoUpdate, RepoUsage, Result, Revision, RevisionHash, RevisionId, StorageCap,
-    UploadReservation, Usage, UserId, Visibility,
+    Branch, ChangesetItem, Commit, FileMode, HistoryCursor, HistoryScan, Lock, MetadataStore, Mode,
+    ObjectId, PathFilter, Person, PushedCommit, PynError, REPO_ALGORITHM, RepoId, RepoPath,
+    RepoRecord, RepoSettings, RepoUpdate, RepoUsage, Result, Revision, RevisionHash, RevisionId,
+    StorageCap, UploadReservation, Usage, UserId, Visibility,
 };
 use sqlx::migrate::MigrateDatabase;
 use sqlx::postgres::{PgPoolOptions, PgRow};
@@ -1636,6 +1637,73 @@ impl MetadataStore for PgMetadataStore {
         Ok(commits)
     }
 
+    async fn missing_commits(
+        &self,
+        repo: &RepoId,
+        tips: &[ObjectId],
+        haves: &[ObjectId],
+        after: Option<&ObjectId>,
+        limit: usize,
+        max_examined: usize,
+    ) -> Result<Vec<Commit>> {
+        let floor: i64 = match after {
+            Some(a) => sqlx::query_scalar("SELECT seq FROM commits WHERE repo = $1 AND id = $2")
+                .bind(repo.as_str())
+                .bind(a.to_hex())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(db)?
+                .ok_or_else(|| PynError::CommitNotFound(a.to_string()))?,
+            None => -1,
+        };
+        let hex = |ids: &[ObjectId]| ids.iter().map(ObjectId::to_hex).collect::<Vec<_>>();
+        let rows = sqlx::query(AssertSqlSafe(format!(
+            "WITH RECURSIVE
+             want(id) AS (
+                 SELECT id FROM commits WHERE repo = $1 AND id = ANY($2) AND seq > $4
+                 UNION
+                 SELECT p.id FROM want JOIN commits c ON c.repo = $1 AND c.id = want.id
+                     CROSS JOIN LATERAL unnest(c.parents) AS pid
+                     JOIN commits p ON p.repo = $1 AND p.id = pid AND p.seq > $4
+             ),
+             have(id) AS (
+                 SELECT id FROM commits WHERE repo = $1 AND id = ANY($3) AND seq > $4
+                 UNION
+                 SELECT p.id FROM have JOIN commits c ON c.repo = $1 AND c.id = have.id
+                     CROSS JOIN LATERAL unnest(c.parents) AS pid
+                     JOIN commits p ON p.repo = $1 AND p.id = pid AND p.seq > $4
+             ),
+             wanted AS MATERIALIZED (SELECT id FROM want LIMIT $5 + 1),
+             owned AS MATERIALIZED (SELECT id FROM have LIMIT $5 + 1),
+             page AS (
+                 SELECT seq, {COMMIT_COLUMNS} FROM commits
+                 WHERE repo = $1 AND id IN (SELECT id FROM wanted)
+                   AND id NOT IN (SELECT id FROM owned)
+                 ORDER BY seq LIMIT $6
+             )
+             SELECT (SELECT count(*) FROM wanted) > $5 OR (SELECT count(*) FROM owned) > $5 AS over, page.*
+             FROM (SELECT 1) one LEFT JOIN page ON true ORDER BY page.seq"
+        )))
+        .bind(repo.as_str())
+        .bind(hex(tips))
+        .bind(hex(haves))
+        .bind(floor)
+        .bind(max_examined as i64)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db)?;
+        if rows.iter().any(|r| r.get::<bool, _>("over")) {
+            return Err(PynError::InvalidRequest(format!(
+                "the request would examine more than {max_examined} commits"
+            )));
+        }
+        rows.iter()
+            .filter(|r| r.get::<Option<String>, _>("id").is_some())
+            .map(commit_from)
+            .collect()
+    }
+
     async fn is_ancestor(
         &self,
         repo: &RepoId,
@@ -1842,6 +1910,36 @@ impl MetadataStore for PgMetadataStore {
         rows.iter().map(revision_from).collect()
     }
 
+    async fn snapshot_page(
+        &self,
+        repo: &RepoId,
+        commit: &ObjectId,
+        prefix: Option<&str>,
+        after: Option<&RepoPath>,
+        limit: usize,
+    ) -> Result<Vec<Revision>> {
+        let rows = sqlx::query(AssertSqlSafe(format!(
+            "{CHAIN}, latest AS (
+                 SELECT DISTINCT ON (p.path COLLATE \"C\") p.path AS lpath, p.revision AS lrev
+                 FROM chain JOIN commit_pointers p ON p.repo = $1 AND p.commit_id = chain.id
+                 WHERE ($3::text IS NULL OR starts_with(p.path, $3))
+                   AND ($4::text IS NULL OR p.path COLLATE \"C\" > $4::text COLLATE \"C\")
+                 ORDER BY p.path COLLATE \"C\", chain.depth
+             )
+             SELECT {REVISION_COLUMNS} FROM revisions JOIN latest ON path = lpath AND id = lrev
+             WHERE repo = $1 AND NOT deleted ORDER BY path COLLATE \"C\" LIMIT $5"
+        )))
+        .bind(repo.as_str())
+        .bind(commit.to_hex())
+        .bind(prefix)
+        .bind(after.map(RepoPath::as_str))
+        .bind(limit.min(i64::MAX as usize) as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db)?;
+        rows.iter().map(revision_from).collect()
+    }
+
     async fn list_head_revisions(&self, repo: &RepoId) -> Result<Vec<Revision>> {
         let rows = sqlx::query(
             "SELECT DISTINCT ON (path) id, path, content, author, message, created_at, restored_from, mode, changeset, commit_no, hash, previous_hash, content_v1, commit_id, file_mode, author_name, author_email, author_offset, hash_version, base_id, deleted
@@ -1882,46 +1980,56 @@ impl MetadataStore for PgMetadataStore {
         filter: Option<&PathFilter>,
         before: Option<&HistoryCursor>,
         limit: usize,
-    ) -> Result<Vec<Revision>> {
-        // The glob cannot run in SQL, so scan keyset batches and filter until `limit` rows match.
-        let batch = (limit.max(1) * 4).clamp(50, 1000) as i64;
-        let mut cursor = before.cloned();
-        let mut out = Vec::new();
-        loop {
-            let rows = sqlx::query(AssertSqlSafe(format!(
-                "{ANCESTORS}
-                 SELECT {REVISION_COLUMNS} FROM revisions
-                 WHERE repo = $2
-                   AND ($1::text IS NULL OR commit_id IN (SELECT id FROM anc))
-                   AND ($3::timestamptz IS NULL
-                        OR (created_at, path COLLATE \"C\", id) < ($3, $4::text COLLATE \"C\", $5::bigint))
-                 ORDER BY created_at DESC, path COLLATE \"C\" DESC, id DESC
-                 LIMIT $6"
-            )))
-            .bind(within.map(ObjectId::to_hex))
-            .bind(repo.as_str())
-            .bind(cursor.as_ref().map(|c| c.created_at))
-            .bind(cursor.as_ref().map(|c| c.path.as_str().to_string()))
-            .bind(cursor.as_ref().map(|c| c.id.0 as i64))
-            .bind(batch)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(db)?;
-            let scanned = rows.len() as i64;
-            for row in &rows {
-                let rev = revision_from(row)?;
-                cursor = Some(HistoryCursor::of(&rev));
-                if filter.is_none_or(|f| f.is_match(&rev.path)) {
-                    out.push(rev);
-                    if out.len() == limit {
-                        return Ok(out);
-                    }
+        budget: usize,
+    ) -> Result<HistoryScan> {
+        // The glob runs here, so one ordered query is read row by row until `limit` rows match or the budget is spent.
+        let budget = budget.max(1);
+        let rows_wanted = if filter.is_some_and(|f| f.prefix().is_none()) {
+            budget
+        } else {
+            limit.min(budget)
+        };
+        let mut rows = sqlx::query(AssertSqlSafe(format!(
+            "{ANCESTORS}
+             SELECT {REVISION_COLUMNS} FROM revisions
+             WHERE repo = $2
+               AND ($1::text IS NULL OR commit_id IN (SELECT id FROM anc))
+               AND ($3::timestamptz IS NULL
+                    OR (created_at, path COLLATE \"C\", id) < ($3, $4::text COLLATE \"C\", $5::bigint))
+               AND ($7::text IS NULL OR starts_with(path, $7))
+             ORDER BY created_at DESC, path COLLATE \"C\" DESC, id DESC
+             LIMIT $6"
+        )))
+        .bind(within.map(ObjectId::to_hex))
+        .bind(repo.as_str())
+        .bind(before.map(|c| c.created_at))
+        .bind(before.map(|c| c.path.as_str().to_string()))
+        .bind(before.map(|c| c.id.0 as i64))
+        .bind(rows_wanted as i64)
+        .bind(filter.and_then(PathFilter::prefix))
+        .fetch(&self.pool);
+        let mut revisions = Vec::new();
+        let mut examined = 0;
+        let mut last = None;
+        while let Some(row) = rows.try_next().await.map_err(db)? {
+            let rev = revision_from(&row)?;
+            examined += 1;
+            last = Some(HistoryCursor::of(&rev));
+            if filter.is_none_or(|f| f.is_match(&rev.path)) {
+                revisions.push(rev);
+                if revisions.len() == limit {
+                    return Ok(HistoryScan {
+                        revisions,
+                        resume: None,
+                    });
                 }
             }
-            if scanned < batch {
-                return Ok(out);
-            }
         }
+        let spent = examined == budget && examined == rows_wanted;
+        Ok(HistoryScan {
+            revisions,
+            resume: if spent { last } else { None },
+        })
     }
 
     async fn create_repo_capped(

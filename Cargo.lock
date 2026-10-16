@@ -1959,6 +1959,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures-util",
  "hex",
  "pyn-core",
  "pyn-object",
@@ -1988,6 +1989,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "http-body",
  "http-body-util",
  "pyn-chunk",
  "pyn-core",

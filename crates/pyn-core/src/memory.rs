@@ -19,7 +19,7 @@ use crate::audit::{AuditEvent, AuditQuery, AuditScope, AuditStore, NewAuditEvent
 use crate::branch::{Branch, DEFAULT_BRANCH, conflicts};
 use crate::commit_record::{CommitDraft, TreeChange, TreeEdit, draft_commit};
 use crate::error::{PynError, Result};
-use crate::history::HistoryCursor;
+use crate::history::{HistoryCursor, HistoryScan};
 use crate::limits::{Limits, LimitsChange, RepoUsage, StorageCap, Usage};
 use crate::merge::{MergeWrite, MergeWritten};
 use crate::object::{KeyHasher, Keying, ObjectRead, ObjectReader, ObjectStore};
@@ -951,6 +951,55 @@ impl MetadataStore for MemoryMetadataStore {
             .collect())
     }
 
+    async fn missing_commits(
+        &self,
+        repo: &RepoId,
+        tips: &[ObjectId],
+        haves: &[ObjectId],
+        after: Option<&ObjectId>,
+        limit: usize,
+        max_examined: usize,
+    ) -> Result<Vec<Commit>> {
+        let st = self.state.lock().unwrap();
+        let all = st.commits.get(repo).map_or(&[][..], Vec::as_slice);
+        let index: HashMap<ObjectId, usize> =
+            all.iter().enumerate().map(|(i, c)| (c.id, i)).collect();
+        let floor = match after {
+            Some(a) => {
+                *index
+                    .get(a)
+                    .ok_or_else(|| PynError::CommitNotFound(a.to_string()))?
+                    + 1
+            }
+            None => 0,
+        };
+        let reach = |from: &[ObjectId]| -> Result<HashSet<usize>> {
+            let mut seen = HashSet::new();
+            let mut stack: Vec<usize> = from.iter().filter_map(|i| index.get(i).copied()).collect();
+            while let Some(at) = stack.pop() {
+                if at < floor || !seen.insert(at) {
+                    continue;
+                }
+                if seen.len() > max_examined {
+                    return Err(PynError::InvalidRequest(format!(
+                        "the request would examine more than {max_examined} commits"
+                    )));
+                }
+                stack.extend(all[at].parents.iter().filter_map(|p| index.get(p).copied()));
+            }
+            Ok(seen)
+        };
+        let wanted = reach(tips)?;
+        let owned = reach(haves)?;
+        let mut out: Vec<usize> = wanted.difference(&owned).copied().collect();
+        out.sort_unstable();
+        Ok(out
+            .into_iter()
+            .take(limit)
+            .map(|i| all[i].clone())
+            .collect())
+    }
+
     async fn is_ancestor(
         &self,
         repo: &RepoId,
@@ -1090,6 +1139,28 @@ impl MetadataStore for MemoryMetadataStore {
             .collect())
     }
 
+    async fn snapshot_page(
+        &self,
+        repo: &RepoId,
+        commit: &ObjectId,
+        prefix: Option<&str>,
+        after: Option<&RepoPath>,
+        limit: usize,
+    ) -> Result<Vec<Revision>> {
+        let st = self.state.lock().unwrap();
+        Ok(st
+            .pointers_at(repo, commit)
+            .into_iter()
+            .filter(|(path, _)| {
+                prefix.is_none_or(|p| path.as_str().starts_with(p))
+                    && after.is_none_or(|a| path > a)
+            })
+            .filter_map(|(path, id)| st.revision(repo, &path, id))
+            .filter(|r| !r.deleted)
+            .take(limit)
+            .collect())
+    }
+
     async fn get_revision(
         &self,
         repo: &RepoId,
@@ -1138,7 +1209,9 @@ impl MetadataStore for MemoryMetadataStore {
         filter: Option<&PathFilter>,
         before: Option<&HistoryCursor>,
         limit: usize,
-    ) -> Result<Vec<Revision>> {
+        budget: usize,
+    ) -> Result<HistoryScan> {
+        let budget = budget.max(1);
         let st = self.state.lock().unwrap();
         let reachable = within.map(|t| st.ancestors(repo, t));
         let mut revs: Vec<&Revision> = st
@@ -1147,11 +1220,33 @@ impl MetadataStore for MemoryMetadataStore {
             .filter(|((r, _), _)| r == repo)
             .flat_map(|(_, revs)| revs)
             .filter(|r| reachable.as_ref().is_none_or(|a| a.contains(&r.commit)))
-            .filter(|r| filter.is_none_or(|f| f.is_match(&r.path)))
             .filter(|r| before.is_none_or(|b| history_key(r) < b.sort_key()))
+            .filter(|r| {
+                filter
+                    .and_then(PathFilter::prefix)
+                    .is_none_or(|p| r.path.as_str().starts_with(p))
+            })
             .collect();
         revs.sort_by_key(|r| std::cmp::Reverse(history_key(r)));
-        Ok(revs.into_iter().take(limit).cloned().collect())
+        let mut revisions = Vec::new();
+        for (i, r) in revs.iter().enumerate() {
+            if i == budget {
+                return Ok(HistoryScan {
+                    revisions,
+                    resume: Some(HistoryCursor::of(revs[i - 1])),
+                });
+            }
+            if filter.is_none_or(|f| f.is_match(&r.path)) {
+                revisions.push((*r).clone());
+                if revisions.len() == limit {
+                    break;
+                }
+            }
+        }
+        Ok(HistoryScan {
+            revisions,
+            resume: None,
+        })
     }
 
     async fn create_repo_capped(
@@ -2652,6 +2747,7 @@ impl AuditStore for MemoryAuditStore {
                         .is_none_or(|p| e.path.as_ref() == Some(p))
                     && query.actor.as_ref().is_none_or(|a| &e.actor == a)
                     && query.action.is_none_or(|a| e.action == a)
+                    && (query.actions.is_empty() || query.actions.contains(&e.action))
             })
             .map(|(_, e)| e.clone())
             .take(query.limit)

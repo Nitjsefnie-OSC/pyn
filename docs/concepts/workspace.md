@@ -245,6 +245,11 @@ What it holds:
   files in the workspace. Every other blob is absent and is fetched on demand by id (`GET .../objects/{id}`), checked
   against the id and stored.
 
+The store is partial by design, so a tool that walks the whole object graph reports missing objects: `git fsck` on the store,
+or on a later git clone made from it, lists the blobs of files that were never checked out or edited here as missing
+(commits and trees are all present). That is not corruption; the server holds every blob, and `pyn verify` checks the
+server's side.
+
 ### Local commits (provisional)
 
 With the setting on, `add`, `commit`, `status` and `branch` work against the store (decision #300, slice #336):
@@ -261,9 +266,20 @@ With the setting on, `add`, `commit`, `status` and `branch` work against the sto
   closing line with the number of local commits the server lacks.
 - `pyn update` brings the server's tip and its history into the store but leaves the local branch and the files that
   local commits changed alone (it reports them as skipped).
+- `pyn log --commits` lists the unpublished commits above the server's, and `pyn show [<commit>]` shows one (`HEAD` or a
+  hash of an unpublished commit; anything else is read from the server). Per-path `pyn log` lists server revisions only.
+- `pyn commit <path>` on a file that has not changed since its last revision says `nothing to commit` (exit `1`).
+- `pyn status` shows `local` as the revision of a file only a local commit has added.
+- A file stays writable after a local commit while you still hold its lock; it goes read-only when you unlock.
 - `pyn branch -v` shows the local tip, and how many commits are unpublished, for the branch the workspace is on.
   Creating, renaming and deleting branches still act on the server.
 - `pyn switch` and `pyn checkout <branch>` refuse to leave a branch that has unpublished local commits.
+- `pyn reset [--soft|--mixed|--hard] [<commit>]` moves the local branch back to `HEAD~N`, a hash on its unpublished chain, or
+  the last published commit (never further), which is the way out of a commit the server will not accept. `--soft` keeps the
+  dropped changes staged, `--mixed` (the default) keeps them in the files unstaged and clears the staging area, `--hard` puts
+  the files back to the commit and asks you to type the branch name (`--yes` skips that). Untracked files are left alone.
+- `pyn lock <path>` for a path a local commit changed takes the server's head revision as the base, so the lock the pull hint
+  asks for works after another person pushed a newer revision of it; `pyn pull` then keeps your version.
 
 Unchanged by the setting: `pyn commit <path> --file ... [--base ...]` and `pyn merge` still publish straight to the
 server, and the server stays the only authority over commits, locks and policy. Only the current branch is stored.

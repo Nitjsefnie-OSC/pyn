@@ -17,7 +17,7 @@ use crate::branch;
 use crate::client::ApiError;
 use crate::local_commit::signature;
 use crate::local_store::{ALGORITHM, Files, LocalStore, build_trees, parse_id};
-use crate::snapshot::short;
+use crate::snapshot::{self, short};
 use crate::staging::Index;
 use crate::stranded;
 use crate::workspace::{Workspace, hash_of, set_read_only};
@@ -73,7 +73,7 @@ fn verified(kind: Kind, id: &str, data: &str) -> Result<(ObjectId, Vec<u8>)> {
     Ok((wanted, body))
 }
 
-fn api_mode(mode: FileMode) -> Result<api::FileMode> {
+pub(crate) fn api_mode(mode: FileMode) -> Result<api::FileMode> {
     Ok(match mode {
         FileMode::Regular => api::FileMode::Regular,
         FileMode::Executable => api::FileMode::Executable,
@@ -106,7 +106,7 @@ impl LocalStore {
         Ok(known)
     }
 
-    fn tree_of(&self, commit: Option<ObjectId>) -> Result<Option<ObjectId>> {
+    pub(crate) fn tree_of(&self, commit: Option<ObjectId>) -> Result<Option<ObjectId>> {
         Ok(match commit {
             Some(id) => Some(self.repo().commit(&id)?.tree),
             None => None,
@@ -829,12 +829,12 @@ pub fn explain_push(err: anyhow::Error, branch: &str) -> anyhow::Error {
         ),
         "forbidden" => (
             format!(" ! [rejected]        {branch} -> {branch} (forbidden)"),
-            "You need the checkin permission on this repository, and the policy permission to change `.pyn/pyn.toml` on the default branch.",
+            "You need the checkin permission on this repository, and the `edit_policy` permission to change `.pyn/pyn.toml` on the default branch.",
         ),
         "invalid_rules" => (
             format!(" ! [rejected]        {branch} -> {branch} (invalid policy)"),
             "The policy file in your commits does not validate.\n\
-             hint: Fix `.pyn/pyn.toml`, amend or add a commit, and push again.",
+             hint: Fix `.pyn/pyn.toml` and commit the fix, or drop the bad commit with `pyn reset HEAD~<n>` (see `pyn reset --help`), then push again.",
         ),
         _ => return err,
     };
@@ -933,13 +933,17 @@ pub fn push(backend: &dyn Backend, ws: &Workspace) -> Result<()> {
     );
     println!(
         "   {}..{}  {branch} -> {branch}",
-        published.map_or_else(|| "0000000".to_string(), |p| short(&p.to_hex()).to_string()),
+        published.map_or_else(
+            || "0".repeat(snapshot::ABBREV),
+            |p| short(&p.to_hex()).to_string()
+        ),
         short(&head.to_hex())
     );
     stranded::print(
         "The policy change left shared versions on other branches that can no longer merge:",
         &response.stranded,
     );
+    stranded::print_released(&response.released_locks);
     Ok(())
 }
 

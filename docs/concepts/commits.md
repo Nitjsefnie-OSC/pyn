@@ -85,14 +85,14 @@ is provisional.
 `<kind> <length>` header, and `id` is the SHA-256 git id it must hash to. Commits go oldest first; `trees` holds the trees the
 commits need that the server may not have. Blobs are not in the body: they are uploaded first through the chunked
 [object routes](storage.md), which is why a missing blob is `object_missing`. The body is at most 64 MiB. The answer is
-`{branch, head, revisions, stranded?}`: the branch's head after the push, the revisions the commits made, in commit order, and, when a policy commit in the push stranded shared versions, the same `stranded` list a direct policy commit reports.
+`{branch, head, revisions, stranded?, released_locks?}`: the branch's head after the push, the revisions the commits made, in commit order, and, when a policy commit in the push stranded shared versions, the same `stranded` list a direct policy commit reports; `released_locks` lists the live locks (path, owner, expiry) such a policy commit released because their paths became shared.
 
 The route is additive: `changesets` and `checkin` remain the direct route (decision #300), and no existing field changed.
 
 Errors, as `{code, message}`: `not_fast_forward` (409), `lock_required` and `lock_held` (409), `stale_base` (409),
 `storage_limit_reached` (409), `push_invalid` (400, an id that does not hash, bytes that are not a git object, a missing tree, a merge of a commit the
 repository lacks, or a commit already stored), `merge_conflict` (409, a merge commit that leaves a diverged exclusive path unresolved), `object_missing` (400), `invalid_request` (400, an empty push or bad base64), `invalid_rules` (400, a policy file on the default branch that does not validate), `push_unsupported` (422),
-`branch_not_found` and `commit_not_found` (404), `forbidden` (403, also for a policy change without the policy permission). No offline lock guarantee exists: a lock is judged when the
+`branch_not_found` and `commit_not_found` (404), `forbidden` (403, also for a policy change without the `edit_policy` permission). No offline lock guarantee exists: a lock is judged when the
 push arrives.
 
 A push is audited like the checkins it makes: one `checkin` entry per revision, with the authenticated pusher as the actor and
@@ -158,7 +158,7 @@ repository is readable without credentials). A client that keeps commits and tre
   An exclusive path needs the pusher's live lock, consumed like a write's (`lock_required`, `lock_held`); the audit log has a
   `delete` entry per deletion.
 - A commit that changes `.pyn/pyn.toml` on the **default branch** is a policy commit, validated like a direct one
-  ([policy](pyn-toml.md)): the pusher needs the policy permission, and the file must parse and validate, or the whole push is
+  ([policy](pyn-toml.md)): the pusher needs the `edit_policy` permission, and the file must parse and validate, or the whole push is
   refused with `invalid_rules` and nothing is recorded. Once the push is recorded the rules apply and conversions, lock releases and
   the stranded-version report run as for a direct policy commit, with the `stranded` list in the answer. The first policy file of a
   repository is the owner's bootstrap and needs no lock; later ones follow the policy file's own mode. The rules a policy commit
@@ -198,7 +198,7 @@ second parent:
   way.
 - A content the tree gives a path that is neither pointer's is a new revision, so an exclusive path needs the lock then too.
   A path the tree removes is a deletion revision.
-- A policy file the merge adopts on the default branch is checked and applied like an arriving policy (policy permission,
+- A policy file the merge adopts on the default branch is checked and applied like an arriving policy (`edit_policy` permission,
   `invalid_rules`), after the push is recorded.
 
 The push is still all or nothing, and the commits keep their ids. A merge is audited as `branch_merged` (detail `(push)`), and
@@ -238,13 +238,13 @@ With `local_store` on ([workspace](workspace.md#the-local-store-provisional)) th
   made, and exclusive files go read-only again (a deleted path leaves the workspace's state). A commit that deletes a path or
   changes `.pyn/pyn.toml` is sent like any other ([deletions and policy commits](#pushed-commits-provisional)); when the
   server adds conversion commits after a policy commit, the next `fetch` brings them in, and the stranded versions it reports
-  are printed after the push as for a direct policy commit. Output: `To <server>/<repo>` and `   <old>..<new>  main -> main`, or
+  are printed after the push as for a direct policy commit, followed by a line per lock the policy released (`released bob's lock on <path>`). Output: `To <server>/<repo>` and `   <old>..<new>  main -> main`, or
   `Everything up-to-date`.
 - A refused push prints a git-style `! [rejected]` line, the server's message, a hint and exits `1`:
   `not_fast_forward` and `stale_base` (also detected locally when the local branch does not build on the fetched tip) tell the
   person to run `pyn pull` and push again; `lock_required` (including a lapsed lease) says to lock the path; `lock_held`
   names that someone else holds it; `invalid_rules` (an invalid policy file, nothing pushed) and `forbidden` (also a policy
-  change without the policy permission) are named; so are `object_missing`, `push_invalid`, `push_unsupported`,
+  change without the `edit_policy` permission) are named; so are `object_missing`, `push_invalid`, `push_unsupported`,
   `storage_limit_reached` and `merge_conflict` (a merge commit leaves a diverged exclusive path unresolved: lock it and
   pull again).
 

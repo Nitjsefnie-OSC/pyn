@@ -23,7 +23,7 @@ pub fn mode_name(mode: api::Mode) -> &'static str {
 }
 
 /// Exclusive files stay read-only until their owner holds the lock.
-fn wants_read_only(entry: &api::FileEntry, me: &str) -> bool {
+pub(crate) fn wants_read_only(entry: &api::FileEntry, me: &str) -> bool {
     entry.mode == api::Mode::Exclusive && entry.lock.as_ref().is_none_or(|l| l.owner != me)
 }
 
@@ -281,7 +281,10 @@ pub fn status(backend: &dyn Backend, ws: &Workspace, commit: Option<&str>) -> Re
         );
         rows.push(vec![
             mode.to_string(),
-            known.map_or("-".to_string(), |k| format!("r{}", k.revision)),
+            known.map_or("-".to_string(), |k| match k.revision {
+                0 => "local".to_string(),
+                r => format!("r{r}"),
+            }),
             stage.to_string(),
             if notes.is_empty() {
                 "clean".to_string()

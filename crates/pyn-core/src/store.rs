@@ -8,6 +8,7 @@ use crate::limits::{RepoUsage, StorageCap, Usage};
 use crate::merge::{MergeWrite, MergeWritten};
 use crate::repo::{RepoRecord, RepoUpdate};
 use crate::rules::PathFilter;
+use crate::tree::HeadCounts;
 use pyn_object::ObjectId;
 
 use crate::types::{
@@ -318,8 +319,16 @@ pub trait MetadataStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<Revision>>;
 
-    /// The newest revision of every path that has one, on any branch, ordered by path.
-    async fn list_head_revisions(&self, repo: &RepoId) -> Result<Vec<Revision>>;
+    /// The counts of `commit`'s snapshot; the cost does not grow with the repository. `CommitNotFound` for an unknown commit.
+    async fn head_counts(&self, repo: &RepoId, commit: &ObjectId) -> Result<HeadCounts>;
+
+    /// The newest revision of each path that has one, on any branch, ordered by path, for paths after `after`; at most `limit`.
+    async fn list_head_revisions(
+        &self,
+        repo: &RepoId,
+        after: Option<&RepoPath>,
+        limit: usize,
+    ) -> Result<Vec<Revision>>;
 
     /// One path's revisions, oldest first; with `within`, only those made in that commit or an ancestor.
     async fn history(
@@ -327,6 +336,17 @@ pub trait MetadataStore: Send + Sync {
         repo: &RepoId,
         path: &RepoPath,
         within: Option<&ObjectId>,
+    ) -> Result<Vec<Revision>>;
+
+    /// One path's revisions numbered above `after`, oldest first, at most `limit`; with `within`, only those made in
+    /// that commit or an ancestor.
+    async fn history_page(
+        &self,
+        repo: &RepoId,
+        path: &RepoPath,
+        within: Option<&ObjectId>,
+        after: Option<RevisionId>,
+        limit: usize,
     ) -> Result<Vec<Revision>>;
 
     /// At most `limit` revisions of the repository matching `filter`, newest first by (created_at, path, id) with paths

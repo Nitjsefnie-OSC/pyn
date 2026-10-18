@@ -11,7 +11,9 @@ empty (a trailing `/` is accepted). Folders come first, then files, each ordered
 `404 path_not_found`; a file path is `400 invalid_request`.
 
 Folders are derived: pyn stores files, so a folder exists while some path under it has a revision or a live lock. The
-listing is not paginated.
+listing is not paginated. The server reads the files under the folder a page at a time and folds them into the children, so its
+memory follows the number of children rather than of files; one listing reads at most 1,000,000 files, and a folder with more
+is `400 invalid_request` (list a folder below it, or page through the file list or the snapshot).
 
 | Field | Meaning |
 | --- | --- |
@@ -32,8 +34,11 @@ nothing yet does not make a folder `mixed`. *Provisional*
 
 - `default_branch` and `branch_count`: the default branch's name (`main`) and how many [branches](branches.md) the repository has.
   Tags are not counted yet. *Provisional*
-- `files`, `exclusive_files`, `shared_files`: paths with at least one revision, split by current mode.
-- `updated_at`: the time of the newest revision.
+- `files`, `exclusive_files`, `shared_files`: paths that exist on the default branch, split by the mode their newest revision
+  was recorded under. The store keeps these counts with each commit and updates them as the commit is written, so the summary
+  is a read of one row however large the repository is. The split differs from the policy's current answer only for a path
+  whose policy went from exclusive to shared and that has not been changed since: its newest revision still says exclusive.
+- `updated_at`: the time of the newest revision made on the default branch's line, a deletion included.
 - `locks`: every live lock with its holder, ordered by path.
 - `activity`: the newest `n` (default 10, at most 100) file and lock events from the [audit log](access.md): `checkout`,
   `release`, `checkin`, `restore`, `force_unlock`. Administrative events (members, roles, tokens, repository changes) and
@@ -45,17 +50,19 @@ Watchers, forks and tags do not exist on the server and are not reported.
 
 `GET /v1/repos/{owner}/{name}/history` needs `read` and always answers `{ revisions, next_cursor }`. It has two modes.
 
-- **One path** (`path=<file>`): every revision of that path, **oldest first**, in one response with no `next_cursor`.
-  This is the order clients already rely on, so it is kept. `path` cannot be combined with the parameters below
-  (`400 invalid_request`).
+- **One path** (`path=<file>`): that path's revisions, **oldest first**, paged like the other mode with `limit` and `before`.
+  This is the order clients already rely on, so it is kept. `path` cannot be combined with `filter` (`400 invalid_request`).
+  Its `next_cursor` is the revision number to continue after (opaque to clients); keep following it until it is absent, because
+  a path with more than `limit` revisions no longer arrives in one response. Each revision on a page is checked against its hash,
+  the revision before it and its base, so a corrupt page is refused rather than served.
 - **Repository-wide** (no `path`): revisions of every path, **newest first**, as the same `Revision` objects (`id`, `path`,
   `author`, `message`, `created_at`, ...), paged.
 
 | Parameter | Meaning |
 | --- | --- |
 | `filter` | a glob over paths; only matching revisions are returned. A bad pattern is `400 invalid_request` |
-| `limit` | page size, default 50, at most 200 |
-| `before` | the previous page's `next_cursor`; omit for the first page |
+| `limit` | page size, default 50, at most 200 (a larger value is capped, 0 is 1) |
+| `before` | the previous page's `next_cursor`; omit for the first page. Not parsable is `400 invalid_request` |
 
 A request examines a bounded number of revisions. When a selective `filter` uses that up before the page is full, the response holds
 what matched so far and a `next_cursor`: keep following it until `next_cursor` is absent.
@@ -75,7 +82,7 @@ and never shift later pages. A cursor that does not parse is `400 invalid_reques
 
 ## Command line
 
-`pyn log <path>` (alias `pyn history`) lists one path's revisions, oldest first (`REV`, `AUTHOR`, `WHEN`, `MESSAGE`). `pyn log` without a
+`pyn log <path>` (alias `pyn history`) lists one path's revisions, oldest first (`REV`, `AUTHOR`, `WHEN`, `MESSAGE`), following the cursor in pages of 200. `pyn log` without a
 path lists the repository's, newest first, with a `PATH` column after `MESSAGE`; `--filter <glob>` narrows it and
 `--limit <n>` (default 50) sets how many to show, following the cursor as needed. `pyn log --commits` lists [commits](commits.md) instead.
 

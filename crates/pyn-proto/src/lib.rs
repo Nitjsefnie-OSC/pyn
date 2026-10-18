@@ -1067,9 +1067,9 @@ pub struct AuditEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct HistoryPage {
-    /// With `path`: all of that path's revisions, oldest first. Without: newest first.
+    /// With `path`: that path's revisions, oldest first. Without: newest first.
     pub revisions: Vec<Revision>,
-    /// Pass as `before` to fetch the next, older page; null on the last page and with `path`.
+    /// Pass as `before` to fetch the next page (the next newer one with `path`, the next older one without); null on the last page.
     #[schema(required = true)]
     pub next_cursor: Option<String>,
 }
@@ -1430,6 +1430,8 @@ pub struct VerifyProblem {
     pub commit: Option<String>,
 }
 
+/// What one `verify` request checked. With `paged=true` a request does a bounded share of the work: add the counts and
+/// problems of the steps together, and send `next_cursor` back as `cursor` until it is null.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct VerifyReport {
     pub paths: u64,
@@ -1439,4 +1441,8 @@ pub struct VerifyReport {
     #[schema(required = true)]
     pub audit_events: Option<u64>,
     pub problems: Vec<VerifyProblem>,
+    /// Opaque; send it as `cursor` for the next step. Null when everything has been checked. Absent from servers that
+    /// check in one request.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
 }

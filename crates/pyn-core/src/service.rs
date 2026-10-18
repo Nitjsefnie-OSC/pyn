@@ -1,8 +1,11 @@
+const TREE_PAGE: usize = 5_000;
+
 mod fetch;
 mod merging;
 mod push;
 mod push_merge;
 mod uploads;
+mod verify;
 pub use uploads::DEFAULT_UNREFERENCED_UPLOAD_BYTES;
 
 pub use fetch::{
@@ -10,6 +13,7 @@ pub use fetch::{
     FetchQuery, FetchedCommit,
 };
 pub use push::{PushObjects, Pushed};
+pub use verify::VERIFY_BUDGET;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
@@ -22,21 +26,21 @@ use crate::audit::{
 };
 use crate::branch::{Branch, DEFAULT_BRANCH, conflicts, validate_branch_name};
 use crate::clock::Clock;
-use crate::commit_record::{TreeChange, tree_of};
 use crate::error::{PynError, Result};
 use crate::history::{
     HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, HISTORY_SCAN_BUDGET, HistoryCursor, HistoryPage,
+    PathHistoryPage,
 };
-use crate::integrity::{
-    BreakKind, Problem, VerifyReport, check_events, verify_audit, verify_revisions,
-};
+use crate::integrity::{BreakKind, check_events, revision_breaks, verify_revisions};
 use crate::limits::{StorageCap, StorageCaps};
 use crate::object::ObjectStore;
 use crate::repo::DEFAULT_MAX_LOCKS_PER_USER;
 use crate::rules::{MAX_POLICY_BYTES, Mode, POLICY_PATH, PathFilter, Rules, policy_too_large};
 use crate::store::MetadataStore;
 use crate::stranded::StrandedVersion;
-use crate::tree::{ACTIVITY_ACTIONS, EntryKind, RepoSummary, TreeEntry};
+use crate::tree::{
+    ACTIVITY_ACTIONS, EntryKind, HeadCounts, RepoSummary, TREE_MAX_PATHS, TreeEntry,
+};
 use crate::types::{
     ChangesetItem, Commit, Lock, MAX_CHANGESET_ITEMS, NewRevision, RepoId, RepoPath, Revision,
     RevisionId, UserId, validate_message,
@@ -1198,43 +1202,41 @@ impl RepoService {
             .collect())
     }
 
-    /// Revision on `branch` and live lock of every path that has either, ordered by path.
-    async fn live_paths(
-        &self,
-        branch: &str,
-        prefix: Option<&str>,
-    ) -> Result<BTreeMap<RepoPath, (Option<Revision>, Option<Lock>)>> {
-        let mut paths: BTreeMap<RepoPath, (Option<Revision>, Option<Lock>)> = BTreeMap::new();
-        for rev in self.heads_page(branch, prefix, None, usize::MAX).await? {
-            paths.insert(rev.path.clone(), (Some(rev), None));
-        }
-        for lock in self.meta.list_locks(&self.repo, self.clock.now()).await? {
-            if prefix.is_some_and(|p| !lock.path.as_str().starts_with(p)) {
-                continue;
-            }
-            let key = lock.path.clone();
-            paths.entry(key).or_default().1 = Some(lock);
-        }
-        Ok(paths)
-    }
-
     /// The children of `dir` (the root when `None`): folders first, then files, each by name. A folder's mode is
-    /// `Mixed` unless every file under it has the same mode.
+    /// `Mixed` unless every file under it has the same mode. The heads are read a page at a time and folded into the
+    /// children, so memory follows the children; one listing reads at most `TREE_MAX_PATHS` heads.
     pub async fn tree(&self, dir: Option<&RepoPath>) -> Result<Vec<TreeEntry>> {
         self.tree_on(DEFAULT_BRANCH, dir).await
     }
 
     /// Like `tree`, as of the head of `branch`.
     pub async fn tree_on(&self, branch: &str, dir: Option<&RepoPath>) -> Result<Vec<TreeEntry>> {
+        self.tree_bounded(branch, dir, TREE_PAGE, TREE_MAX_PATHS)
+            .await
+    }
+
+    /// Like `tree_on`, reading heads `page` at a time and refusing a folder of more than `max` files.
+    pub async fn tree_bounded(
+        &self,
+        branch: &str,
+        dir: Option<&RepoPath>,
+        page_size: usize,
+        max: usize,
+    ) -> Result<Vec<TreeEntry>> {
+        let page_size = page_size.max(1);
         let rules = self.rules_on(branch).await?;
         let prefix = dir.map_or(String::new(), |d| format!("{d}/"));
-        let paths = self
-            .live_paths(branch, dir.is_some().then_some(prefix.as_str()))
-            .await?;
+        let heads_prefix = dir.is_some().then_some(prefix.as_str());
+        let mut locks: BTreeMap<RepoPath, Lock> = BTreeMap::new();
+        for lock in self.meta.list_locks(&self.repo, self.clock.now()).await? {
+            if heads_prefix.is_none_or(|p| lock.path.as_str().starts_with(p)) {
+                locks.insert(lock.path.clone(), lock);
+            }
+        }
         let mut children: BTreeMap<(EntryKind, String), TreeEntry> = BTreeMap::new();
-        for (path, (rev, lock)) in &paths {
+        let mut fold = |path: &RepoPath, rev: Option<Revision>, lock: Option<Lock>| -> Result<()> {
             let Some(rest) = path.as_str().strip_prefix(&prefix) else {
-                continue;
+                return Ok(());
             };
             let (kind, name) = match rest.split_once('/') {
                 Some((first, _)) => (EntryKind::Folder, first),
@@ -1249,12 +1251,8 @@ impl RepoService {
                         path: child,
                         kind,
                         mode: mode.into(),
-                        last_change: rev.clone(),
-                        lock: if kind == EntryKind::File {
-                            lock.clone()
-                        } else {
-                            None
-                        },
+                        last_change: rev,
+                        lock: if kind == EntryKind::File { lock } else { None },
                     });
                 }
                 std::collections::btree_map::Entry::Occupied(mut o) => {
@@ -1266,10 +1264,37 @@ impl RepoService {
                             .as_ref()
                             .is_none_or(|c| rev.created_at > c.created_at)
                     {
-                        entry.last_change = Some(rev.clone());
+                        entry.last_change = Some(rev);
                     }
                 }
             }
+            Ok(())
+        };
+        let mut after: Option<RepoPath> = None;
+        let mut read = 0;
+        loop {
+            let page = self
+                .heads_page(branch, heads_prefix, after.as_ref(), page_size)
+                .await?;
+            let Some(last) = page.last() else { break };
+            after = Some(last.path.clone());
+            read += page.len();
+            if read > max {
+                return Err(PynError::InvalidRequest(format!(
+                    "a listing reads at most {max} files; list a folder below this one"
+                )));
+            }
+            let full = page.len() == page_size;
+            for rev in page {
+                let lock = locks.remove(&rev.path);
+                fold(&rev.path.clone(), Some(rev), lock)?;
+            }
+            if !full {
+                break;
+            }
+        }
+        for (path, lock) in std::mem::take(&mut locks) {
+            fold(&path, None, Some(lock))?;
         }
         if children.is_empty()
             && let Some(dir) = dir
@@ -1290,18 +1315,14 @@ impl RepoService {
         Ok(children.into_values().collect())
     }
 
-    /// Counts, live locks and the newest `activity_limit` file and lock events.
+    /// Counts, live locks and the newest `activity_limit` file and lock events. The counts are stored per commit.
     pub async fn summary(&self, activity_limit: usize) -> Result<RepoSummary> {
-        let paths = self.live_paths(DEFAULT_BRANCH, None).await?;
-        let (mut files, mut exclusive_files, mut updated_at) = (0, 0, None);
-        for (path, (rev, _)) in &paths {
-            let Some(rev) = rev else { continue };
-            files += 1;
-            if self.mode_for(path) == Mode::Exclusive {
-                exclusive_files += 1;
-            }
-            updated_at = updated_at.max(Some(rev.created_at));
-        }
+        let counts = match self.default_head().await? {
+            Some(head) => self.meta.head_counts(&self.repo, &head).await?,
+            None => HeadCounts::default(),
+        };
+        let mut locks = self.meta.list_locks(&self.repo, self.clock.now()).await?;
+        locks.sort_by(|a, b| a.path.cmp(&b.path));
         let scope = AuditScope::Repo(self.repo.clone());
         let query = AuditQuery {
             actions: ACTIVITY_ACTIONS.to_vec(),
@@ -1312,11 +1333,11 @@ impl RepoService {
         Ok(RepoSummary {
             default_branch: DEFAULT_BRANCH.to_string(),
             branch_count: self.branches().await?.len() as u32,
-            files,
-            exclusive_files,
-            shared_files: files - exclusive_files,
-            updated_at,
-            locks: paths.into_values().filter_map(|(_, lock)| lock).collect(),
+            files: counts.files,
+            exclusive_files: counts.exclusive_files,
+            shared_files: counts.files - counts.exclusive_files,
+            updated_at: counts.updated_at,
+            locks,
             activity,
         })
     }
@@ -1477,170 +1498,97 @@ impl RepoService {
         Ok(revisions)
     }
 
-    /// The part of a path's history that `branch` contains, oldest first; the whole line is checked first.
+    /// The part of a path's history that `branch` contains, oldest first, read page by page.
     pub async fn history_on(&self, branch: &str, path: &RepoPath) -> Result<Vec<Revision>> {
-        let all = self.history(path).await?;
-        let Some(tip) = self.head_of(branch).await? else {
-            return Ok(Vec::new());
-        };
-        let kept = self.meta.history(&self.repo, path, Some(&tip)).await?;
-        let ids: std::collections::BTreeSet<_> = kept.iter().map(|r| r.id).collect();
-        Ok(all.into_iter().filter(|r| ids.contains(&r.id)).collect())
-    }
-
-    /// Checks every path's revision chain, and the audit log when `audit` is set, reporting all breaks instead of
-    /// stopping at the first. With `path`, only that path.
-    pub async fn verify(&self, path: Option<&RepoPath>, audit: bool) -> Result<VerifyReport> {
-        let paths = match path {
-            Some(p) => vec![p.clone()],
-            None => self
-                .meta
-                .list_head_revisions(&self.repo)
-                .await?
-                .into_iter()
-                .map(|r| r.path)
-                .collect(),
-        };
-        let mut report = VerifyReport::default();
-        for p in paths {
-            let revisions = self.meta.history(&self.repo, &p, None).await?;
-            if revisions.is_empty() {
-                return Err(PynError::PathNotFound(p.to_string()));
-            }
-            report.paths += 1;
-            report.revisions += revisions.len() as u64;
-            let mut found = verify_revisions(&revisions);
-            for id in self.pointer_mismatches(&revisions).await? {
-                if !found.contains(&(id, BreakKind::Base)) {
-                    found.push((id, BreakKind::Base));
-                }
-            }
-            for (id, kind) in found {
-                report.problems.push(Problem {
-                    kind,
-                    path: Some(p.clone()),
-                    revision: Some(id),
-                    event: None,
-                    commit: None,
-                });
-            }
-        }
-        if path.is_none() {
-            self.verify_commits(&mut report).await?;
-        }
-        if audit && path.is_none() {
-            let scope = AuditScope::Repo(self.repo.clone());
-            let mut events = Vec::new();
-            let mut before = None;
-            loop {
-                let page = self
-                    .audit
-                    .list(
-                        &scope,
-                        &AuditQuery {
-                            before,
-                            limit: HISTORY_MAX_LIMIT,
-                            ..AuditQuery::default()
-                        },
-                    )
-                    .await?;
-                let Some(last) = page.last() else { break };
-                before = Some(last.id);
-                events.extend(page);
-            }
-            events.reverse();
-            report.audit_events = Some(events.len() as u64);
-            for (id, kind) in verify_audit(&scope, &events) {
-                report.problems.push(Problem {
-                    kind,
-                    path: None,
-                    revision: None,
-                    event: Some(id),
-                    commit: None,
-                });
-            }
-        }
-        Ok(report)
-    }
-
-    /// Exclusive revisions whose stored base is not the path's pointer at the first parent of their commit.
-    async fn pointer_mismatches(&self, revisions: &[Revision]) -> Result<Vec<RevisionId>> {
-        let mut bad = Vec::new();
-        for r in revisions.iter().filter(|r| r.mode == Some(Mode::Exclusive)) {
-            let Some(commit) = self.meta.get_commit(&self.repo, &r.commit).await? else {
-                continue;
-            };
-            let expected = match commit.parents.first() {
-                Some(parent) => self
-                    .meta
-                    .revision_at(&self.repo, parent, &r.path)
-                    .await?
-                    .map(|p| p.id),
-                None => None,
-            };
-            if expected != r.base {
-                bad.push(r.id);
-            }
-        }
-        Ok(bad)
-    }
-
-    /// Checks every commit's id against its fields and its parent links, and each branch head's tree against the
-    /// snapshot at that head.
-    async fn verify_commits(&self, report: &mut VerifyReport) -> Result<()> {
         let mut all = Vec::new();
-        let mut before = None;
+        let mut after = None;
         loop {
             let page = self
-                .meta
-                .commits(&self.repo, None, before.as_ref(), HISTORY_MAX_LIMIT)
+                .history_page_on(branch, path, after, Some(HISTORY_MAX_LIMIT))
                 .await?;
-            let Some(last) = page.last() else { break };
-            before = Some(last.id);
-            all.extend(page);
+            all.extend(page.revisions);
+            after = page.next;
+            if after.is_none() {
+                return Ok(all);
+            }
         }
-        all.reverse();
-        report.commits = all.len() as u64;
-        let problem = |kind, c: &Commit| Problem {
-            kind,
-            path: None,
-            revision: None,
-            event: None,
-            commit: Some(c.id),
+    }
+
+    /// One page of a path's revisions on `branch`, oldest first, numbered above `after`; each is checked against its
+    /// hash, its predecessor and its base. `limit` defaults to 50 and is capped at 200.
+    pub async fn history_page_on(
+        &self,
+        branch: &str,
+        path: &RepoPath,
+        after: Option<RevisionId>,
+        limit: Option<usize>,
+    ) -> Result<PathHistoryPage> {
+        let limit = limit
+            .unwrap_or(HISTORY_DEFAULT_LIMIT)
+            .clamp(1, HISTORY_MAX_LIMIT);
+        let Some(tip) = self.head_of(branch).await? else {
+            return Ok(PathHistoryPage {
+                revisions: Vec::new(),
+                next: None,
+            });
         };
-        let mut seen = std::collections::HashSet::new();
-        for c in &all {
-            if c.verify().is_err() {
-                report.problems.push(problem(BreakKind::Hash, c));
-            }
-            let linked = c.parents.iter().all(|p| seen.contains(p))
-                && (!c.parents.is_empty() || seen.is_empty());
-            if !linked {
-                report.problems.push(problem(BreakKind::Link, c));
-            }
-            seen.insert(c.id);
+        let mut revisions = self
+            .meta
+            .history_page(&self.repo, path, Some(&tip), after, limit + 1)
+            .await?;
+        let next = (revisions.len() > limit).then(|| {
+            revisions.truncate(limit);
+            revisions[limit - 1].id
+        });
+        if let Some((id, kind)) = self.run_breaks(path, &revisions).await?.first() {
+            return Err(PynError::HistoryCorrupt(format!(
+                "{path}@r{id}: {}",
+                kind.as_str()
+            )));
         }
-        for branch in self.meta.list_branches(&self.repo).await? {
-            let Some(head) = branch.head.and_then(|h| all.iter().find(|c| c.id == h)) else {
-                continue;
+        Ok(PathHistoryPage { revisions, next })
+    }
+
+    /// Breaks in `run`, revisions of one path oldest first that need not be consecutive: each is checked against the
+    /// revision one below it, read from the store when it is not in `run`, and against its base.
+    async fn run_breaks(
+        &self,
+        path: &RepoPath,
+        run: &[Revision],
+    ) -> Result<Vec<(RevisionId, BreakKind)>> {
+        let mut breaks = Vec::new();
+        for (i, r) in run.iter().enumerate() {
+            let pred = i
+                .checked_sub(1)
+                .map(|j| &run[j])
+                .filter(|p| p.id.0 + 1 == r.id.0);
+            let fetched;
+            let pred = match pred {
+                Some(p) => Some(p),
+                None if r.id.0 > 1 => {
+                    fetched = self
+                        .meta
+                        .get_revision(&self.repo, path, RevisionId(r.id.0 - 1))
+                        .await?;
+                    fetched.as_ref()
+                }
+                None => None,
             };
-            let files = self
-                .meta
-                .snapshot(&self.repo, &head.id)
-                .await?
-                .iter()
-                .map(|r| TreeChange {
-                    path: r.path.clone(),
-                    mode: r.file_mode,
-                    id: r.content,
-                    removed: false,
-                })
-                .collect();
-            if tree_of(files)?.root != head.tree {
-                report.problems.push(problem(BreakKind::Tree, head));
+            breaks.extend(revision_breaks(r, pred).into_iter().map(|k| (r.id, k)));
+            if let Some(base) = r.base {
+                let known = base < r.id
+                    && (run.iter().any(|o| o.id == base)
+                        || self
+                            .meta
+                            .get_revision(&self.repo, path, base)
+                            .await?
+                            .is_some());
+                if !known {
+                    breaks.push((r.id, BreakKind::Base));
+                }
             }
         }
-        Ok(())
+        Ok(breaks)
     }
 
     /// Repository-wide history, newest first; `limit` defaults to 50 and is capped at 200.

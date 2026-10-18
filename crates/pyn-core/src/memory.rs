@@ -31,6 +31,7 @@ use crate::repo_policy::{
 };
 use crate::rules::{Mode, PathFilter};
 use crate::store::{MetadataStore, UploadReservation};
+use crate::tree::HeadCounts;
 use crate::types::{
     ChangesetItem, Commit, Lock, Person, PushedCommit, RepoId, RepoPath, Revision, RevisionId,
     UserId,
@@ -1172,15 +1173,49 @@ impl MetadataStore for MemoryMetadataStore {
         Ok(revs.and_then(|v| v.iter().find(|r| r.id == id).cloned()))
     }
 
-    async fn list_head_revisions(&self, repo: &RepoId) -> Result<Vec<Revision>> {
+    async fn head_counts(&self, repo: &RepoId, commit: &ObjectId) -> Result<HeadCounts> {
+        let st = self.state.lock().unwrap();
+        if st.commit_record(repo, commit).is_none() {
+            return Err(PynError::CommitNotFound(commit.to_hex()));
+        }
+        let mut counts = HeadCounts::default();
+        let mut next = Some(*commit);
+        while let Some(id) = next {
+            for (path, rev) in st.pointers.get(&(repo.clone(), id)).into_iter().flatten() {
+                let at = st.revision(repo, path, *rev).map(|r| r.created_at);
+                counts.updated_at = counts.updated_at.max(at);
+            }
+            next = st
+                .commit_record(repo, &id)
+                .and_then(|c| c.parents.first().copied());
+        }
+        for rev in st
+            .pointers_at(repo, commit)
+            .into_iter()
+            .filter_map(|(path, id)| st.revision(repo, &path, id))
+            .filter(|r| !r.deleted)
+        {
+            counts.files += 1;
+            counts.exclusive_files += u64::from(rev.mode == Some(Mode::Exclusive));
+        }
+        Ok(counts)
+    }
+
+    async fn list_head_revisions(
+        &self,
+        repo: &RepoId,
+        after: Option<&RepoPath>,
+        limit: usize,
+    ) -> Result<Vec<Revision>> {
         let st = self.state.lock().unwrap();
         let mut heads: Vec<Revision> = st
             .revisions
             .iter()
-            .filter(|((r, _), _)| r == repo)
+            .filter(|((r, p), _)| r == repo && after.is_none_or(|a| p > a))
             .filter_map(|(_, revs)| revs.last().cloned())
             .collect();
         heads.sort_by(|a, b| a.path.cmp(&b.path));
+        heads.truncate(limit);
         Ok(heads)
     }
 
@@ -1198,6 +1233,28 @@ impl MetadataStore for MemoryMetadataStore {
             .into_iter()
             .flatten()
             .filter(|r| reachable.as_ref().is_none_or(|a| a.contains(&r.commit)))
+            .cloned()
+            .collect())
+    }
+
+    async fn history_page(
+        &self,
+        repo: &RepoId,
+        path: &RepoPath,
+        within: Option<&ObjectId>,
+        after: Option<RevisionId>,
+        limit: usize,
+    ) -> Result<Vec<Revision>> {
+        let st = self.state.lock().unwrap();
+        let reachable = within.map(|t| st.ancestors(repo, t));
+        Ok(st
+            .revisions
+            .get(&(repo.clone(), path.clone()))
+            .into_iter()
+            .flatten()
+            .filter(|r| after.is_none_or(|a| r.id > a))
+            .filter(|r| reachable.as_ref().is_none_or(|a| a.contains(&r.commit)))
+            .take(limit)
             .cloned()
             .collect())
     }

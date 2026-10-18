@@ -46,9 +46,16 @@ pub use push_changes::*;
 mod fetch;
 pub use fetch::*;
 mod counting;
+mod counts;
 mod history;
+mod verify;
 pub use counting::CountingStore;
+pub use counts::{
+    a_listing_reads_heads_a_page_at_a_time_and_stops_at_its_bound,
+    commit_counts_follow_adds_deletes_modes_branches_and_merges,
+};
 pub use history::*;
+pub use verify::*;
 mod deletion;
 pub use deletion::*;
 mod push_merge;
@@ -3261,6 +3268,11 @@ macro_rules! contract_tests {
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_walk_past_the_examination_cap_is_refused);
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_scan_that_spends_its_budget_resumes_from_a_cursor);
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; listings_page_in_the_store_and_agree_with_the_whole_listing);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_path_history_pages_by_revision_number_and_ends_exactly);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; verification_in_steps_covers_the_same_ground_at_every_budget);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; head_revisions_page_by_path);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; commit_counts_follow_adds_deletes_modes_branches_and_merges);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_listing_reads_heads_a_page_at_a_time_and_stops_at_its_bound);
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_push_deletes_shared_paths_and_whole_folders);
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_file_turned_into_a_folder_or_back_deletes_and_adds);
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; deleting_an_exclusive_path_in_a_push_needs_the_pushers_live_lock);
@@ -4031,8 +4043,21 @@ impl MetadataStore for HookedMeta {
             .await
     }
 
-    async fn list_head_revisions(&self, repo: &RepoId) -> crate::Result<Vec<crate::Revision>> {
-        self.inner.list_head_revisions(repo).await
+    async fn head_counts(
+        &self,
+        repo: &RepoId,
+        commit: &ObjectId,
+    ) -> crate::Result<crate::HeadCounts> {
+        self.inner.head_counts(repo, commit).await
+    }
+
+    async fn list_head_revisions(
+        &self,
+        repo: &RepoId,
+        after: Option<&RepoPath>,
+        limit: usize,
+    ) -> crate::Result<Vec<crate::Revision>> {
+        self.inner.list_head_revisions(repo, after, limit).await
     }
 
     async fn history(
@@ -4042,6 +4067,19 @@ impl MetadataStore for HookedMeta {
         within: Option<&ObjectId>,
     ) -> crate::Result<Vec<crate::Revision>> {
         self.inner.history(repo, path, within).await
+    }
+
+    async fn history_page(
+        &self,
+        repo: &RepoId,
+        path: &RepoPath,
+        within: Option<&ObjectId>,
+        after: Option<RevisionId>,
+        limit: usize,
+    ) -> crate::Result<Vec<crate::Revision>> {
+        self.inner
+            .history_page(repo, path, within, after, limit)
+            .await
     }
 
     async fn repo_history(

@@ -55,7 +55,7 @@ pub use email::{EmailMessage, EmailSender, MemoryEmailSender, NullEmailSender};
 pub use error::{PynError, Result};
 pub use history::{
     HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, HISTORY_SCAN_BUDGET, HistoryCursor, HistoryPage,
-    HistoryScan,
+    HistoryScan, PathHistoryPage, decode_path_cursor, encode_path_cursor,
 };
 pub use integrity::{BreakKind, Problem, VerifyReport};
 pub use limits::{
@@ -89,10 +89,11 @@ pub use service::{
     ChangeEntry, CommitPage, Deletion, FETCH_DEFAULT_LIMIT, FETCH_MAX_EXAMINED, FETCH_MAX_HAVES,
     FETCH_MAX_LIMIT, FetchPage, FetchQuery, FetchedCommit, FileEntry, LockLimit, PolicyPreview,
     PushObjects, Pushed, Recorded, RepoService, ServiceConfig, Snapshot, SnapshotEntry,
+    VERIFY_BUDGET,
 };
 pub use store::{MetadataStore, UploadReservation};
 pub use stranded::{ConversionNote, StrandedVersion};
-pub use tree::{EntryKind, EntryMode, RepoSummary, TreeEntry};
+pub use tree::{EntryKind, EntryMode, HeadCounts, RepoSummary, TREE_MAX_PATHS, TreeEntry};
 pub use types::{
     ChangesetItem, Commit, Lock, MAX_CHANGESET_ITEMS, MAX_LABEL_BYTES, MAX_MESSAGE_BYTES,
     MAX_PATH_BYTES, MAX_PATH_COMPONENT_BYTES, MAX_PUSH_COMMITS, NewRevision, Person, PushedCommit,

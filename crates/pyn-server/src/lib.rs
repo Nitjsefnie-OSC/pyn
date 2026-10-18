@@ -12,7 +12,7 @@ use pyn_core::repositories::OpenRepo;
 use pyn_core::{
     AccessService, AuditAction, AuditQuery, AuthProvider, ChangeEntry, Deletion, HistoryCursor,
     Identity, Keying, ObjectStore, PathFilter, Permission, Principal, PynError, RepoPath,
-    Repositories, RevisionId,
+    Repositories, RevisionId, VERIFY_BUDGET, decode_path_cursor, encode_path_cursor,
 };
 use pyn_proto as api;
 use serde::Deserialize;
@@ -1252,13 +1252,13 @@ struct HistoryQuery {
 #[utoipa::path(get, path = "/v1/repos/{owner}/{name}/history",
     params(RepoAddress,
            ("branch" = Option<String>, Query, description = "the branch to read; the default branch if omitted"),
-           ("path" = Option<String>, Query, description = "one path's revisions, oldest first; excludes the other parameters"),
+           ("path" = Option<String>, Query, description = "one path's revisions, oldest first, paged; excludes filter"),
            ("filter" = Option<String>, Query, description = "glob over paths for repository history; no slash matches at any depth"),
-           ("before" = Option<String>, Query, description = "the previous page's next_cursor"),
+           ("before" = Option<String>, Query, description = "the previous page's next_cursor, for repository history and for path"),
            ("limit" = Option<usize>, Query, description = "page size, default 50, max 200")),
     responses((status = 200, body = api::HistoryPage),
               (status = 404, body = api::ErrorBody, description = "branch_not_found"),
-              (status = 400, body = api::ErrorBody, description = "invalid_request for a bad filter or cursor, or path combined with them")))]
+              (status = 400, body = api::ErrorBody, description = "invalid_request for a bad filter or cursor, or path combined with filter")))]
 async fn history(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -1267,22 +1267,24 @@ async fn history(
 ) -> ApiResult<Json<api::HistoryPage>> {
     let repo = authorize_read(&s, &headers, &owner, &name).await?;
     if let Some(path) = q.path {
-        if q.filter.is_some() || q.before.is_some() || q.limit.is_some() {
-            return Err(PynError::InvalidRequest(
-                "path cannot be combined with filter, before or limit".into(),
-            )
-            .into());
+        if q.filter.is_some() {
+            return Err(
+                PynError::InvalidRequest("path cannot be combined with filter".into()).into(),
+            );
         }
-        let revs = repo
+        let after = q.before.as_deref().map(decode_path_cursor).transpose()?;
+        let page = repo
             .service
-            .history_on(
+            .history_page_on(
                 branch_of(q.branch.as_deref()),
                 &RepoPath::from_stored(path)?,
+                after,
+                q.limit,
             )
             .await?;
         return Ok(Json(api::HistoryPage {
-            revisions: revs.into_iter().map(revision_dto).collect(),
-            next_cursor: None,
+            revisions: page.revisions.into_iter().map(revision_dto).collect(),
+            next_cursor: page.next.map(encode_path_cursor),
         }));
     }
     let filter = q.filter.as_deref().map(PathFilter::new).transpose()?;
@@ -1305,13 +1307,18 @@ async fn history(
 #[derive(Deserialize)]
 struct VerifyQuery {
     path: Option<String>,
+    cursor: Option<String>,
+    paged: Option<bool>,
 }
 
 /// Needs `read`; the audit log is also checked for callers with `view_audit`. Without `path` the caller must be signed in.
 #[utoipa::path(get, path = "/v1/repos/{owner}/{name}/verify",
     params(RepoAddress,
-           ("path" = Option<String>, Query, description = "check only this path; the audit log is then not checked")),
+           ("path" = Option<String>, Query, description = "check only this path; the audit log is then not checked"),
+           ("cursor" = Option<String>, Query, description = "the previous step's next_cursor; omit for the first step"),
+           ("paged" = Option<bool>, Query, description = "true to accept a partial report with next_cursor; otherwise a repository that needs more than one step is invalid_request")),
     responses((status = 200, body = api::VerifyReport),
+              (status = 400, body = api::ErrorBody, description = "invalid_request for a bad cursor, or when the check needs more than one step and paged is not set"),
               (status = 401, body = api::ErrorBody, description = "unauthenticated for a whole-repository check without credentials"),
               (status = 404, body = api::ErrorBody, description = "path_not_found for a path without revisions")))]
 async fn verify(
@@ -1332,9 +1339,21 @@ async fn verify(
     let path = q.path.map(RepoPath::from_stored).transpose()?;
     let report = repo
         .service
-        .verify(path.as_ref(), principal.has(Permission::ViewAudit))
+        .verify_step(
+            path.as_ref(),
+            principal.has(Permission::ViewAudit),
+            q.cursor.as_deref(),
+            VERIFY_BUDGET,
+        )
         .await?;
+    if report.next.is_some() && q.paged != Some(true) {
+        return Err(PynError::InvalidRequest(
+            "checking this repository takes more than one request; ask for it in steps with paged=true".into(),
+        )
+        .into());
+    }
     Ok(Json(api::VerifyReport {
+        next_cursor: report.next,
         paths: report.paths,
         revisions: report.revisions,
         commits: report.commits,

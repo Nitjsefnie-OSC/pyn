@@ -203,15 +203,20 @@ impl Backend for PynServer {
 
     fn path_history(&self, path: &str) -> Result<Vec<api::Revision>> {
         let api = &self.api;
-        let page: api::HistoryPage = api
-            .send(
-                api.on_branch(
-                    api.get(&api.repo_route("/history")?)
-                        .query(&[("path", path)]),
-                ),
-            )?
-            .json()?;
-        Ok(page.revisions)
+        let mut revs: Vec<api::Revision> = Vec::new();
+        let mut before: Option<String> = None;
+        loop {
+            let mut query = vec![("path", path.to_string()), ("limit", "200".to_string())];
+            query.extend(before.take().map(|b| ("before", b)));
+            let page: api::HistoryPage = api
+                .send(api.on_branch(api.get(&api.repo_route("/history")?).query(&query)))?
+                .json()?;
+            revs.extend(page.revisions);
+            before = page.next_cursor;
+            if before.is_none() {
+                return Ok(revs);
+            }
+        }
     }
 
     fn repo_history(&self, filter: Option<&str>, limit: usize) -> Result<Vec<api::Revision>> {
@@ -245,5 +250,40 @@ impl Backend for PynServer {
                 .json(&request),
         )?
         .json()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::Backend;
+    use crate::transport::canned::api_with;
+
+    fn page(ids: &[u64], next: Option<&str>) -> String {
+        let revs: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id, "path": "a", "content": "c", "author": "u", "message": "m",
+                    "created_at": "2026-10-08T09:00:00Z", "commit": "c", "hash": "h",
+                    "file_mode": "100644", "hash_version": 2, "deleted": false,
+                    "restored_from": null, "previous": null, "base": null, "mode": null,
+                    "changeset": null, "author_identity": null, "legacy_content": null,
+                })
+            })
+            .collect();
+        serde_json::json!({"revisions": revs, "next_cursor": next}).to_string()
+    }
+
+    #[test]
+    fn a_paths_history_follows_the_cursor_in_pages_of_200() {
+        let (api, canned) = api_with(vec![page(&[1, 2], Some("2")), page(&[3], None)]);
+        let revs = PynServer::new(api).path_history("a").unwrap();
+        assert_eq!(revs.iter().map(|r| r.id).collect::<Vec<_>>(), [1, 2, 3]);
+        let seen = canned.seen.lock().unwrap();
+        let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+        assert!(seen[0].contains(&pair("limit", "200")) && seen[0].contains(&pair("path", "a")));
+        assert!(!seen[0].iter().any(|(k, _)| k == "before"));
+        assert!(seen[1].contains(&pair("before", "2")));
     }
 }

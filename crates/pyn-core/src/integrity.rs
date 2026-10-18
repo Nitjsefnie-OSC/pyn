@@ -166,23 +166,30 @@ impl BreakKind {
     }
 }
 
+/// The hash, version and link breaks of `r`, given `pred`, the revision numbered one below it (none for r1).
+pub fn revision_breaks(r: &Revision, pred: Option<&Revision>) -> Vec<BreakKind> {
+    let mut breaks = Vec::new();
+    if r.version_problem().is_some() {
+        breaks.push(BreakKind::Version);
+    } else if r.expected_hash() != r.hash {
+        breaks.push(BreakKind::Hash);
+    }
+    let linked = match pred {
+        None => r.previous.is_none() && r.id.0 == 1,
+        Some(p) => r.previous.as_ref() == Some(&p.hash) && r.id.0 == p.id.0 + 1,
+    };
+    if !linked {
+        breaks.push(BreakKind::Link);
+    }
+    breaks
+}
+
 /// Every break in one path's revisions, oldest first; a missing revision shows as a broken link.
 pub fn verify_revisions(revisions: &[Revision]) -> Vec<(RevisionId, BreakKind)> {
     let mut breaks = Vec::new();
     let mut prior: Option<&Revision> = None;
     for r in revisions {
-        if r.version_problem().is_some() {
-            breaks.push((r.id, BreakKind::Version));
-        } else if r.expected_hash() != r.hash {
-            breaks.push((r.id, BreakKind::Hash));
-        }
-        let linked = match prior {
-            None => r.previous.is_none() && r.id.0 == 1,
-            Some(p) => r.previous.as_ref() == Some(&p.hash) && r.id.0 == p.id.0 + 1,
-        };
-        if !linked {
-            breaks.push((r.id, BreakKind::Link));
-        }
+        breaks.extend(revision_breaks(r, prior).into_iter().map(|k| (r.id, k)));
         if let Some(base) = r.base
             && (base >= r.id || !revisions.iter().any(|o| o.id == base))
         {
@@ -234,9 +241,19 @@ impl AuditEvent {
 
 /// Every break in one audit log, oldest first.
 pub fn verify_audit(scope: &AuditScope, events: &[AuditEvent]) -> Vec<(i64, BreakKind)> {
+    verify_audit_run(scope, events, None)
+}
+
+/// Every break in `run`, a stretch of one audit log oldest first, whose first event follows `before` (none when the
+/// run starts the log).
+pub fn verify_audit_run(
+    scope: &AuditScope,
+    run: &[AuditEvent],
+    before: Option<&AuditEvent>,
+) -> Vec<(i64, BreakKind)> {
     let mut breaks = Vec::new();
-    let mut prior: Option<&AuditEvent> = None;
-    for e in events {
+    let mut prior = before;
+    for e in run {
         if e.expected_hash(scope) != e.hash {
             breaks.push((e.id, BreakKind::Hash));
         }
@@ -268,6 +285,8 @@ pub struct Problem {
 /// The result of verifying a path, or a repository's revisions and audit log. `audit_events` is `None` when the log was not checked.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VerifyReport {
+    /// Where to continue when the work of one step ran out; `None` once everything is checked.
+    pub next: Option<String>,
     pub paths: u64,
     pub revisions: u64,
     pub commits: u64,

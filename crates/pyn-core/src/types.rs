@@ -131,6 +131,8 @@ pub const MAX_PUSH_COMMITS: usize = 10_000;
 pub const MAX_COMMIT_CHANGES: usize = MAX_CHANGESET_ITEMS;
 /// Most file changes across all the commits of one push.
 pub const MAX_PUSH_CHANGES: usize = 50_000;
+/// Most entries in one tree a push brings or a check-in builds.
+pub const MAX_TREE_ENTRIES: usize = 100_000;
 
 /// A name or title: 1 to `MAX_LABEL_BYTES` bytes, no control characters. Returns it trimmed.
 pub fn validate_label(what: &str, text: &str) -> Result<String> {

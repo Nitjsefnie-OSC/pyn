@@ -17,7 +17,7 @@ use crate::rules::{Mode, POLICY_PATH, Rules};
 use crate::stranded::StrandedVersion;
 use crate::types::{
     Commit, Lock, MAX_COMMIT_CHANGES, MAX_MESSAGE_BYTES, MAX_PUSH_CHANGES, MAX_PUSH_COMMITS,
-    NewRevision, PushedCommit, RepoPath, Revision,
+    MAX_TREE_ENTRIES, NewRevision, PushedCommit, RepoPath, Revision,
 };
 
 /// Raw git objects a push carries: commits oldest first, and the trees they need that the server may not have.
@@ -366,6 +366,11 @@ impl RepoService {
         };
         let entries = parse_tree(REPO_ALGORITHM, &body)
             .map_err(|e| invalid(format!("tree {id} is not a git tree: {e}")))?;
+        if from_push && entries.len() > MAX_TREE_ENTRIES {
+            return Err(invalid(format!(
+                "tree {id} holds more than {MAX_TREE_ENTRIES} entries"
+            )));
+        }
         Ok((entries, from_push))
     }
 

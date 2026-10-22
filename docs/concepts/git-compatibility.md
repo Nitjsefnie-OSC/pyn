@@ -99,7 +99,8 @@ The commands named in decision #218.
 | `git show -U<n>`, `--stat`, `--shortstat`, `-w`, `--check`, `--name-only`, `--name-status` | same | same | The diff flags behave as on `diff`, and `--stat` is laid out as git lays it out at 80 columns (long names cut with `...`, graph scaled); `--check` exits `2` when it reports a problem. |
 | `git show <rev>:<path>` | `pyn get <path> [--rev N] [-o <file>]` | different | `show` takes commits only (`HEAD:foo` fails with `fatal: ... is not a commit`, `128`). File content at a revision is `pyn get`, to stdout or a file. `--rev` is a per-path revision, not a commit. |
 | `git show --oneline`, `-s` (`--no-patch`), `--format=`, `--pretty=`, `--date=` | same | supported | Both homes, with the formats of `log`. `-s` prints the commit only; `--oneline` and the formats print their line, then the diff (blank line between for a template or a named format, none for `--oneline`). Without them a pyn server prints its own header (see above). |
-| `git show <tag>`, `<object>` | none | unsupported | `fatal: ... is not a commit`. |
+| `git show <tag>` | `pyn show <tag>` | different | On a pyn server with the local store, an annotated tag prints `tag <name>`, `Tagger:`, `Date:` and its message, then the commit; a lightweight tag, or a tag with `~N`/`^` steps, shows the commit. A git home shows the commit only. |
+| `git show <object>` | none | unsupported | `fatal: ... is not a commit`. |
 | `git restore --source=<rev> <path>` | `pyn restore --source <rev> <path>` (or `pyn restore <path> <rev>`) | different | pyn's restore appends a new revision on the server: it needs the lock, the `restore` permission and a typed confirmation (`--yes` skips it); `-m` sets the message. The revision is required (git defaults to the index or HEAD) and `-s` is the short form of `--source`. Git's restore only edits the working tree. |
 | `git restore --staged <path>...` | `pyn restore --staged <path>...` (`-S`) | same | Puts the staged entries under the paths back to the last commit and leaves the files alone. On a git home `--source <commit>` takes the entries from that commit, as git; on a pyn server there is no commit to take them from and it is a usage error. |
 | `git restore [-s <rev>] [-S] [-W] <path>...` (the work tree) | `pyn restore ...` on a git home | git home only | Takes the paths from the index (or `--source`) into the work tree, and with `--staged --worktree` into both. See [Branches, switching and the work tree](#branches-switching-and-the-work-tree). On a pyn server `--worktree` is a usage error (`129`): a restore there makes an older revision the new head. |
@@ -113,7 +114,7 @@ The commands named in decision #218.
 | `git pull` | `pyn pull` on a git home | git home only | Fetch, then merge through `pyn merge`; see [Pull on a git home](#pull-on-a-git-home). On a pyn server it fetches into the local store and merges (a workspace cloned with `--no-local-store` runs `pyn update`), see [Remotes on a pyn server](#remotes-on-a-pyn-server). |
 | `git push` | `pyn push` on a git home | git home only | See [Push on a git home](#push-on-a-git-home). On a pyn server it publishes the local commits (a workspace cloned with `--no-local-store` prints that there is nothing to push, because a commit goes straight to the server); see [Remotes on a pyn server](#remotes-on-a-pyn-server). |
 | `git remote` | `pyn remote` | git home; pyn server partly | On a git home it lists and edits the remotes in `.git/config`, see [Remotes](#remotes). On a pyn server `pyn remote`, `pyn remote -v` and `pyn remote get-url origin` show the one remote, `origin`: the server and repository set by `--server` and `--repo` or `pyn config set server` and `repo`; `add`, `remove`, `rename` and `set-url` say that a server home has exactly one home and exit `1`. |
-| `git tag [-a] [-s] [-u <keyid>] [--no-sign] [-m <msg>] [-f] [<name> [<commit>]]`, `-d`, `-l` | `pyn tag ...` on a git home | git home only | See [Tags](#tags). On a pyn server it prints the git-command message (a server's commits are named by hash and have no tags yet, #223). |
+| `git tag [-a] [-s] [-u <keyid>] [--no-sign] [-m <msg>] [-f] [<name> [<commit>]]`, `-d`, `-l` | `pyn tag ...` | supported | See [Tags](#tags). On a pyn server the tags are local-only refs in the local store (workspaces with `local_store` on); they are never pushed, and `-s`, `-u` are refused (#447). |
 | `git stash [push] [-p] [-u] [-k] [-m <msg>] [-- <paths>]`, `list`, `pop`, `apply` (`--index`), `drop`, `clear`, `show`, `branch`, `create`, `store` | `pyn stash ...` on a git home | git home only | See [Stashing](#stashing). On a pyn server it prints the git-command message. |
 | `git clean [-n] [-f] [-d] [-x\|-X] [-q] [-i] [-e <pattern>] [--] [<path>...]` | `pyn clean ...` on a git home | git home only | See [Clean](#clean). Without `-f`, `-n` or `-i` it refuses, as `clean.requireForce` does; `-i` is git's menu; pathspecs take globs (`*`, `?`, `[...]`) but no `:` magic. |
 
@@ -1407,6 +1408,13 @@ date. After an interactive rebase git leaves `REBASE_HEAD` behind in some cases;
 `GIT_COMMITTER_*` or `user.name` and `user.email` (an error without them), the object's type, and the cleaned message, byte for
 byte as git writes it. There is no editor, so `-a` needs `-m`. `-f` replaces a tag (`Updated tag '<name>' (was <id>)`), `-d` deletes
 (`Deleted tag '<name>' (was <id>)`). `-s`, `-u <keyid>`, `--no-sign` and `tag.gpgsign` sign an annotated tag (see [Signing](#signing)). Tags get no reflog unless `core.logAllRefUpdates=always`.
+
+On a pyn server workspace with `local_store` on, `pyn tag` has the same create, list (`-l`), `-a`/`-m`, `-f` and `-d` forms, with the
+tag refs kept in the local store (`refs/tags/` there). The tagger is the signed-in account (`<account>@pyn.invalid`), `HEAD` is
+the workspace branch's local tip, and the commit is `HEAD~N`, a hash or another tag. Tags are local only: `pyn push` and
+`pyn pull` neither send nor fetch them, the server has no tag concept (publishing tags is a separate decision and needs a contract
+change), and a workspace without the store refuses `tag` and says how to turn the store on. `pyn show` and `pyn diff` accept a tag name
+wherever they take a commit; `pyn log` takes no commit on a server. Signing (`-s`, `-u`) needs a git home.
 
 ### Signing
 

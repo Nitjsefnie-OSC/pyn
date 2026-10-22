@@ -319,6 +319,13 @@ already published. Nothing is sent: the result is an unpublished commit like any
   only the commits it merged; staged changes, uncommitted edits to a file the commits change, and a workspace without a
   fetched branch stop the command before anything changes.
 
+### Tags
+
+`pyn tag` in a workspace with the local store creates, lists and deletes lightweight and annotated tags as refs in the store, the
+forms and output being those of a [git home](git-compatibility.md#tags). A tag is never pushed or fetched; publishing tags would
+need a server concept and its own decision. `pyn show <tag>` prints an annotated tag's message before the commit, and `pyn diff`
+takes a tag wherever it takes a commit.
+
 ### Revert
 
 `pyn revert <commit>...` undoes the change each named commit made with a new local commit on the workspace's branch. The

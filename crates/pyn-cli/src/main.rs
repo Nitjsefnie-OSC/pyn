@@ -27,6 +27,7 @@ mod local_sync;
 mod local_tags;
 mod local_view;
 mod localfile;
+mod log_filter;
 mod ls_remote;
 mod merging;
 mod migrate;
@@ -1065,6 +1066,17 @@ fn run(cli: Cli) -> Result<()> {
         ));
     }
     if git.is_none()
+        && let Command::Commit {
+            git: opts, paths, ..
+        } = &cli.command
+        && !paths.is_empty()
+        && let Some(flag) = opts.author_flag()
+    {
+        usage_error(&format!(
+            "`pyn commit {flag}` applies to staged changes committed to the local store, not to a path commit"
+        ));
+    }
+    if git.is_none()
         && let Command::Commit { git: opts, .. } = &cli.command
         && opts.quiet
     {
@@ -1079,9 +1091,13 @@ fn run(cli: Cli) -> Result<()> {
     {
         *message = vec![text];
     }
-    if let Command::Log { git: opts, .. } = &cli.command
+    if let Command::Log {
+        git: opts, path, ..
+    } = &cli.command
         && git.is_none()
-        && let Some(flag) = opts.first_given()
+        && let Some(flag) = opts.server_unsupported().or_else(|| {
+            log_filter::too_many_paths(path.as_deref(), opts, &cwd).then(|| "<path>".to_string())
+        })
     {
         usage_error(&format!(
             "`pyn log {flag}` applies to a git repository, not a pyn server"
@@ -1771,6 +1787,7 @@ fn run(cli: Cli) -> Result<()> {
             base,
             message,
             all,
+            git: flags,
             ..
         } if paths.is_empty() => {
             if file.is_some() || base.is_some() {
@@ -1778,6 +1795,9 @@ fn run(cli: Cli) -> Result<()> {
             }
             let w = in_workspace("commit")?;
             if merging::in_progress(w) && !merging::is_paused(w) {
+                if let Some(flag) = flags.author_flag() {
+                    bail!("`pyn commit {flag}` does not apply while finishing a merge");
+                }
                 if all {
                     bail!(
                         "cannot do a partial commit during a merge; stage what you resolved with `pyn add`"
@@ -1786,7 +1806,7 @@ fn run(cli: Cli) -> Result<()> {
                 let message = (!message.is_empty()).then(|| message.join("\n\n"));
                 merging::finish(&backend, backend.pyn_server("commit")?, w, message)?;
             } else {
-                staging::commit(&backend, w, &message.join("\n\n"), all)?;
+                staging::commit(&backend, w, &message.join("\n\n"), all, &flags)?;
             }
         }
         Command::Commit { all: true, .. } => {
@@ -1912,9 +1932,24 @@ fn run(cli: Cli) -> Result<()> {
             commits,
             limit,
             git: log_args,
-        } if commits || log_args.format().first_given().is_some() || log_args.diff_given() => {
+        } if commits
+            || log_args.format().first_given().is_some()
+            || log_args.diff_given()
+            || log_filter::selects(path.as_deref(), &log_args, &cwd, false) =>
+        {
             branch::note_branch(ws.as_ref());
             let limit = limit.unwrap_or(50);
+            let selected = log_filter::selects(path.as_deref(), &log_args, &cwd, true);
+            if selected && filter.is_some() {
+                usage_error(
+                    "`pyn log --filter` cannot combine with commit filters, revisions or a path",
+                );
+            }
+            let narrow = if selected {
+                log_filter::build(&backend, &log_args, path.as_deref(), &cwd, &rp)?
+            } else {
+                log_filter::CommitFilter::default()
+            };
             let parts = log_args.diff_parts();
             let rendering = match log_args.format().requested()? {
                 Some(r) => Some(r),
@@ -1922,22 +1957,29 @@ fn run(cli: Cli) -> Result<()> {
                 None => None,
             };
             if let Some(rendering) = rendering {
-                if path.is_some() || filter.is_some() || log_args.sole_dashed().is_some() {
-                    usage_error(
-                        "`pyn log` with a format lists commits and takes no path or --filter on a pyn server",
-                    );
+                if parts.any() && narrow.path.is_some() {
+                    usage_error("`pyn log` diff output takes no path on a pyn server");
                 }
-                return log_formatted(&backend, ws.as_ref(), limit, &rendering, &parts);
+                if filter.is_some() {
+                    usage_error("`pyn log` with a format lists commits and takes no --filter");
+                }
+                return log_formatted(&backend, ws.as_ref(), limit, &rendering, &parts, &narrow);
             }
             let mut rows: Vec<Vec<String>> =
                 match ws.as_ref().and_then(local_store::LocalStore::open) {
-                    Some(store) => local_view::log_rows(&store, &branch::name(ws.as_ref()))?,
-                    None => Vec::new(),
+                    Some(store) if !selected => {
+                        local_view::log_rows(&store, &branch::name(ws.as_ref()))?
+                    }
+                    _ => Vec::new(),
                 };
             rows.truncate(limit);
             let mut before: Option<String> = None;
             while rows.len() < limit {
-                let page = backend.commit_page(before.as_deref(), (limit - rows.len()).min(200))?;
+                let page = backend.commit_page_filtered(
+                    before.as_deref(),
+                    (limit - rows.len()).min(200),
+                    &narrow,
+                )?;
                 for c in page.commits {
                     rows.push(vec![
                         snapshot::short(&c.id).to_string(),
@@ -2340,17 +2382,24 @@ fn log_formatted(
     limit: usize,
     rendering: &commit_format::Rendering,
     parts: &diff::DiffParts,
+    narrow: &log_filter::CommitFilter,
 ) -> Result<()> {
     let store = ws.and_then(local_store::LocalStore::open);
     let mut commits = match &store {
-        Some(store) => local_view::log_commits(store, &branch::name(ws))?,
-        None => Vec::new(),
+        Some(store) if *narrow == log_filter::CommitFilter::default() => {
+            local_view::log_commits(store, &branch::name(ws))?
+        }
+        _ => Vec::new(),
     };
     commits.truncate(limit);
     let local = commits.len();
     let mut before: Option<String> = None;
     while commits.len() < limit {
-        let page = backend.commit_page(before.as_deref(), (limit - commits.len()).min(200))?;
+        let page = backend.commit_page_filtered(
+            before.as_deref(),
+            (limit - commits.len()).min(200),
+            narrow,
+        )?;
         commits.extend(page.commits);
         before = page.next_before;
         if before.is_none() {

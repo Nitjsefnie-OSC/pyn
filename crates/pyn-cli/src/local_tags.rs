@@ -18,6 +18,8 @@ pub struct Named {
     pub annotation: Option<String>,
 }
 
+const TAGS: &str = "refs/tags/";
+
 fn open(ws: Option<&Workspace>) -> Result<LocalStore> {
     match ws.and_then(LocalStore::open) {
         Some(store) => Ok(store),
@@ -149,4 +151,29 @@ pub fn expand_args(ws: Option<&Workspace>, args: &[String]) -> Result<Vec<String
             None => one(a),
         })
         .collect()
+}
+
+fn store_at(cwd: &std::path::Path) -> Option<LocalStore> {
+    Workspace::discover(cwd).as_ref().and_then(LocalStore::open)
+}
+
+/// The tag names of the workspace around `cwd`, none outside one with a local store.
+pub fn names(cwd: &std::path::Path) -> Vec<String> {
+    let Some(store) = store_at(cwd) else {
+        return Vec::new();
+    };
+    let listed = store.repo().refs().list(TAGS);
+    listed
+        .into_iter()
+        .flatten()
+        .map(|(full, _)| full[TAGS.len()..].to_string())
+        .collect()
+}
+
+/// [`expand`] for the workspace around `cwd`.
+pub fn expand_at(cwd: &std::path::Path, text: &str) -> Result<Option<Named>> {
+    match store_at(cwd) {
+        Some(store) => expand(&store, text),
+        None => Ok(None),
+    }
 }

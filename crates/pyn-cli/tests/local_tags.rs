@@ -153,3 +153,78 @@ fn without_a_local_store_tag_says_how_to_get_one() {
     let err = env.fails(&ws, "alice", &["tag", "v1"]);
     assert!(err.contains("local store"), "{err}");
 }
+
+fn published(env: &Env, path: &str, text: &str, message: &str) {
+    let dir = env.dir("seed");
+    let file = dir.join("upload");
+    std::fs::write(&file, text).unwrap();
+    env.ok(
+        &dir,
+        "alice",
+        &[
+            "commit",
+            path,
+            "--file",
+            file.to_str().unwrap(),
+            "-m",
+            message,
+        ],
+    );
+}
+
+fn subjects(env: &Env, ws: &Path, args: &[&str]) -> String {
+    let mut all = vec!["log", "--format=%s"];
+    all.extend(args);
+    env.ok(ws, "alice", &all)
+}
+
+/// Three published commits (one, two, three) tagged `v1` (first) and `v2` (second), and a tag `Source` on the first.
+fn three() -> (Env, PathBuf) {
+    let env = start();
+    published(&env, "Source/a.cpp", "a", "one");
+    published(&env, "Source/b.cpp", "b", "two");
+    published(&env, "Docs/c.md", "c", "three");
+    let ws = clone_with(&env, "ws", &["--local-store"]);
+    env.ok(&ws, "alice", &["tag", "v1", "HEAD~2"]);
+    env.ok(&ws, "alice", &["tag", "-m", "second", "v2", "HEAD~1"]);
+    env.ok(&ws, "alice", &["tag", "Source", "HEAD~2"]);
+    (env, ws)
+}
+
+#[test]
+fn log_takes_tag_names_as_revisions_and_in_ranges() {
+    let (env, ws) = three();
+    assert_eq!(subjects(&env, &ws, &["v2"]), "two\none\n");
+    assert_eq!(subjects(&env, &ws, &["v2~1"]), "one\n");
+    assert_eq!(subjects(&env, &ws, &["v2^"]), "one\n");
+    assert_eq!(subjects(&env, &ws, &["v1..HEAD"]), "three\ntwo\n");
+    assert_eq!(subjects(&env, &ws, &["v1..v2"]), "two\n");
+    assert_eq!(subjects(&env, &ws, &["v1.."]), "three\ntwo\n");
+    assert_eq!(subjects(&env, &ws, &["..v2"]), "");
+    assert_eq!(subjects(&env, &ws, &["^v1", "HEAD"]), "three\ntwo\n");
+    assert_eq!(subjects(&env, &ws, &["v2", "--", "Source/a.cpp"]), "one\n");
+}
+
+#[test]
+fn a_path_named_like_a_tag_stays_a_path_unless_dashes_say_otherwise() {
+    let (env, ws) = three();
+    assert_eq!(subjects(&env, &ws, &["Source"]), "two\none\n");
+    assert_eq!(subjects(&env, &ws, &["Source", "--", "Source"]), "one\n");
+}
+
+#[test]
+fn a_tag_on_an_unpublished_commit_is_refused_by_log_with_a_reason() {
+    let (env, ws) = three();
+    commit_local(&env, &ws, "Source/a.cpp", "local", "local work");
+    env.ok(&ws, "alice", &["tag", "mine"]);
+    let err = env.fails(&ws, "alice", &["log", "mine"]);
+    assert!(
+        err.contains("'mine' names an unpublished local commit"),
+        "{err}"
+    );
+    env.ok(&ws, "alice", &["push"]);
+    assert_eq!(
+        subjects(&env, &ws, &["mine"]),
+        "local work\nthree\ntwo\none\n"
+    );
+}

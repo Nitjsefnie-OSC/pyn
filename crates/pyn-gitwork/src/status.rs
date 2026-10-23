@@ -13,7 +13,7 @@ use crate::ignore::{Ignore, Level, parse_rules};
 use crate::pathspec::Pathspec;
 use crate::repo::{Head, Repo};
 use crate::tree::Entry;
-use crate::{SubmoduleIgnore, SubmoduleStatus};
+use crate::{SubmoduleIgnore, SubmoduleStatus, Submodules};
 
 const GITLINK: u32 = 0o160000;
 const SYMLINK: u32 = 0o120000;
@@ -180,11 +180,12 @@ impl Repo {
     pub fn status(&self) -> Result<Status> {
         let head = self.head()?;
         let index = self.read_index()?;
+        let modules = self.submodules();
         let mut rows: BTreeMap<Vec<u8>, StatusEntry> = BTreeMap::new();
         for (path, kind) in self.staged_changes(&head, &index)? {
             row(&mut rows, path).staged = Some(kind);
         }
-        for (path, kind) in self.unstaged_changes(&index)? {
+        for (path, kind) in self.unstaged_changes_with_submodules(&index, &modules)? {
             row(&mut rows, path).unstaged = Some(kind);
         }
         for e in index
@@ -195,7 +196,7 @@ impl Repo {
             if let Some(row) = rows.get_mut(&e.path)
                 && row.unstaged == Some(Kind::Modified)
             {
-                row.submodule = self.submodule_status(&e.path, e.id, SubmoduleIgnore::None)?;
+                row.submodule = modules.status(&e.path, e.id, SubmoduleIgnore::None)?;
             }
         }
         for e in index.entries.iter().filter(|e| e.stage > 0) {
@@ -274,6 +275,15 @@ impl Repo {
 
     /// Paths whose work tree file differs from the index, plus unmerged paths.
     pub fn unstaged_changes(&self, index: &Index) -> Result<BTreeMap<Vec<u8>, Kind>> {
+        self.unstaged_changes_with_submodules(index, &self.submodules())
+    }
+
+    /// Work tree changes using the current operation's submodule settings.
+    pub fn unstaged_changes_with_submodules(
+        &self,
+        index: &Index,
+        modules: &Submodules<'_>,
+    ) -> Result<BTreeMap<Vec<u8>, Kind>> {
         let root = self.root()?;
         let file_mode = self.bool_setting("core.filemode", true);
         let index_time = std::fs::metadata(self.git().index_path())
@@ -285,7 +295,7 @@ impl Repo {
         for e in &index.entries {
             if e.stage > 0 {
                 out.insert(e.path.clone(), Kind::Unmerged);
-            } else if let Some(kind) = self.check_entry(root, e, file_mode, index_time)? {
+            } else if let Some(kind) = self.check_entry(root, e, file_mode, index_time, modules)? {
                 out.insert(e.path.clone(), kind);
             }
         }
@@ -298,12 +308,13 @@ impl Repo {
         e: &IndexEntry,
         file_mode: bool,
         index_time: Option<u64>,
+        modules: &Submodules<'_>,
     ) -> Result<Option<Kind>> {
         if e.assume_valid || e.skip_worktree {
             return Ok(None);
         }
         if e.mode == GITLINK
-            && self.submodule_ignore(&e.path, SubmoduleIgnore::None)? == SubmoduleIgnore::All
+            && modules.ignore(&e.path, SubmoduleIgnore::None)? == SubmoduleIgnore::All
         {
             return Ok(None);
         }
@@ -315,7 +326,8 @@ impl Repo {
         };
         if e.mode == GITLINK {
             return Ok(if meta.is_dir() {
-                self.submodule_status(&e.path, e.id, SubmoduleIgnore::None)?
+                modules
+                    .status(&e.path, e.id, SubmoduleIgnore::None)?
                     .filter(SubmoduleStatus::changed)
                     .map(|_| Kind::Modified)
             } else {

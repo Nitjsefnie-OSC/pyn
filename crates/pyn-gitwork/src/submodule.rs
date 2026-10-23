@@ -1,5 +1,8 @@
 //! Read-only gitlink inspection and the superproject's submodule ignore settings.
 
+use std::cell::OnceCell;
+use std::collections::HashMap;
+
 use pyn_git::Config;
 use pyn_object::ObjectId;
 
@@ -30,15 +33,38 @@ impl SubmoduleStatus {
     }
 }
 
+#[derive(Default)]
+struct ConfigReads {
+    parses: usize,
+    index: usize,
+    head: usize,
+}
+
+impl Drop for ConfigReads {
+    fn drop(&mut self) {
+        if std::env::var_os("PYN_DEBUG_SUBMODULE_CONFIG").is_some() {
+            eprintln!(
+                "submodule config reads: parses={} index={} head={}",
+                self.parses, self.index, self.head
+            );
+        }
+    }
+}
+
 impl Repo {
     fn gitmodules(&self) -> Result<Config> {
+        let mut reads = ConfigReads::default();
         let file = self.root()?.join(".gitmodules");
         match std::fs::symlink_metadata(&file) {
-            Ok(m) if m.is_file() => return Ok(Config::read(&file)?),
+            Ok(m) if m.is_file() => {
+                reads.parses += 1;
+                return Ok(Config::read(&file)?);
+            }
             Ok(_) => return Ok(Config::default()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(io_at(&file)(e)),
         }
+        reads.index += 1;
         let index = self.read_index()?;
         if index
             .entries
@@ -53,17 +79,31 @@ impl Repo {
             .find(|e| e.stage == 0 && e.path.as_slice() == b".gitmodules")
         {
             Some(e) => Some(e.id),
-            None => match self.head_commit()? {
-                Some(head) => self
-                    .entry_at(&self.commit(&head)?.tree, b".gitmodules")?
-                    .map(|e| e.id),
-                None => None,
-            },
+            None => {
+                reads.head += 1;
+                match self.head_commit()? {
+                    Some(head) => self
+                        .entry_at(&self.commit(&head)?.tree, b".gitmodules")?
+                        .map(|e| e.id),
+                    None => None,
+                }
+            }
         };
         Ok(match id {
-            Some(id) => Config::parse(&self.blob(&id)?)?,
+            Some(id) => {
+                reads.parses += 1;
+                Config::parse(&self.blob(&id)?)?
+            }
             None => Config::default(),
         })
+    }
+
+    /// Submodule settings shared by one inspection of this repository.
+    pub fn submodules(&self) -> Submodules<'_> {
+        Submodules {
+            repo: self,
+            config: OnceCell::new(),
+        }
     }
 
     /// Per-name config overrides `.gitmodules`, then `diff.ignoreSubmodules`, then the command's default.
@@ -72,20 +112,86 @@ impl Repo {
         path: &[u8],
         default: SubmoduleIgnore,
     ) -> Result<SubmoduleIgnore> {
-        let modules = self.gitmodules()?;
-        let name = modules.entries().iter().rev().find_map(|e| {
-            (e.section == "submodule"
-                && e.key == "path"
-                && e.value.as_deref().map(str::as_bytes) == Some(path))
-            .then_some(e.subsection.as_deref())
-            .flatten()
-        });
-        let per_name = name.and_then(|name| {
-            let key = format!("submodule.{name}.ignore");
-            self.config().get(&key).or_else(|| modules.get(&key))
-        });
-        let value = per_name.or_else(|| self.config().get("diff.ignoresubmodules"));
-        Ok(match value {
+        self.submodules().ignore(path, default)
+    }
+
+    /// A missing `.git` is an uninitialized checkout; opening never discovers the parent repository.
+    pub fn submodule_status(
+        &self,
+        path: &[u8],
+        recorded: ObjectId,
+        default: SubmoduleIgnore,
+    ) -> Result<Option<SubmoduleStatus>> {
+        self.submodules().status(path, recorded, default)
+    }
+}
+
+#[derive(Default)]
+struct SubmoduleConfig {
+    paths: HashMap<Vec<u8>, String>,
+    ignores: HashMap<String, String>,
+    default: Option<String>,
+}
+
+/// Lazily loaded submodule settings for one status or diff operation.
+pub struct Submodules<'a> {
+    repo: &'a Repo,
+    config: OnceCell<SubmoduleConfig>,
+}
+
+impl Submodules<'_> {
+    fn config(&self) -> Result<&SubmoduleConfig> {
+        if self.config.get().is_none() {
+            let modules = self.repo.gitmodules()?;
+            let mut config = SubmoduleConfig {
+                default: self
+                    .repo
+                    .config()
+                    .get("diff.ignoresubmodules")
+                    .map(str::to_owned),
+                ..SubmoduleConfig::default()
+            };
+            for e in modules.entries() {
+                let Some(name) = e.subsection.as_ref().filter(|_| e.section == "submodule") else {
+                    continue;
+                };
+                match e.key.as_str() {
+                    "path" => {
+                        if let Some(path) = &e.value {
+                            config.paths.insert(path.as_bytes().to_vec(), name.clone());
+                        }
+                    }
+                    "ignore" => {
+                        config
+                            .ignores
+                            .insert(name.clone(), e.value.clone().unwrap_or_default());
+                    }
+                    _ => {}
+                }
+            }
+            for e in self.repo.config().entries() {
+                if e.section == "submodule"
+                    && e.key == "ignore"
+                    && let Some(name) = &e.subsection
+                {
+                    config
+                        .ignores
+                        .insert(name.clone(), e.value.clone().unwrap_or_default());
+                }
+            }
+            let _ = self.config.set(config);
+        }
+        Ok(self.config.get().expect("submodule settings initialized"))
+    }
+
+    pub fn ignore(&self, path: &[u8], default: SubmoduleIgnore) -> Result<SubmoduleIgnore> {
+        let config = self.config()?;
+        let value = config
+            .paths
+            .get(path)
+            .and_then(|name| config.ignores.get(name))
+            .or(config.default.as_ref());
+        Ok(match value.map(String::as_str) {
             None => default,
             Some("none") => SubmoduleIgnore::None,
             Some("untracked") => SubmoduleIgnore::Untracked,
@@ -99,22 +205,22 @@ impl Repo {
         })
     }
 
-    /// A missing `.git` is an uninitialized checkout; opening never discovers the parent repository.
-    pub fn submodule_status(
+    /// Inspects a gitlink using this operation's settings.
+    pub fn status(
         &self,
         path: &[u8],
         recorded: ObjectId,
         default: SubmoduleIgnore,
     ) -> Result<Option<SubmoduleStatus>> {
-        let ignore = self.submodule_ignore(path, default)?;
+        let ignore = self.ignore(path, default)?;
         if ignore == SubmoduleIgnore::All {
             return Ok(None);
         }
-        let root = fs_path(self.root()?, path);
+        let root = fs_path(self.repo.root()?, path);
         if !root.join(".git").exists() {
             return Ok(None);
         }
-        let sub = self.open_submodule(&root)?;
+        let sub = self.repo.open_submodule(&root)?;
         let head = sub.head_commit()?.unwrap_or(recorded);
         let mut state = SubmoduleStatus {
             head,

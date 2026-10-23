@@ -24,5 +24,5 @@ pub use safepath::{
     check_paths,
 };
 pub use status::{Conflict, Kind, Status, StatusEntry, fs_path, hash_worktree_file, worktree_mode};
-pub use submodule::{SubmoduleIgnore, SubmoduleStatus};
+pub use submodule::{SubmoduleIgnore, SubmoduleStatus, Submodules};
 pub use tree::{Change, Entry, MAX_TREE_DEPTH};

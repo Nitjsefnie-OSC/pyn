@@ -916,3 +916,108 @@ fn commit_all_modified_gitlinks() {
     });
 }
 
+
+fn submodule_config_reads(source: &str, args: &[&str]) {
+    for format in FORMATS {
+        let f = Fixture::new(format, false);
+        let other = f.repo.join("other");
+        gitfix::copy_tree(&f.sub, &other);
+        fs::write(
+            f.repo.join(".gitmodules"),
+            format!(
+                "{}[submodule \"other\"]\n path = other\n url = ../other\n",
+                Fixture::modules(Some("none"))
+            ),
+        )
+        .unwrap();
+        let id = run(&f.sub, &["rev-parse", "HEAD"]);
+        run(
+            &f.repo,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{},other", id.trim()),
+            ],
+        );
+        run(&f.repo, &["add", ".gitmodules"]);
+        run(&f.repo, &["commit", "-qm", "two submodules"]);
+        if source == "HEAD" {
+            run(&f.repo, &["update-index", "--force-remove", ".gitmodules"]);
+        }
+        if source != "worktree" {
+            fs::remove_file(f.repo.join(".gitmodules")).unwrap();
+        }
+        fs::write(f.sub.join("file"), "dirty\n").unwrap();
+        fs::write(other.join("file"), "dirty\n").unwrap();
+        let want = run(&f.repo, args);
+        assert!(want.contains("sub") && want.contains("other"), "{want}");
+        let got = Command::new(env!("CARGO_BIN_EXE_pyn"))
+            .current_dir(&f.repo)
+            .args(args)
+            .env_clear()
+            .env("PATH", path_env())
+            .env("HOME", f.repo.parent().unwrap().join("home"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("TZ", "UTC")
+            .env("PYN_DEBUG_SUBMODULE_CONFIG", "1")
+            .output()
+            .unwrap();
+        assert_eq!(
+            got.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&got.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&got.stdout), want);
+        let stderr = String::from_utf8_lossy(&got.stderr);
+        let mut counts = [0; 3];
+        for line in stderr.lines() {
+            let values = line
+                .strip_prefix("submodule config reads: ")
+                .expect("unexpected diagnostic");
+            for (count, value) in counts.iter_mut().zip(values.split_whitespace()) {
+                *count += value.split_once('=').unwrap().1.parse::<usize>().unwrap();
+            }
+        }
+        assert_eq!(
+            counts,
+            [
+                1,
+                usize::from(source != "worktree"),
+                usize::from(source == "HEAD")
+            ],
+            "{args:?}, {source}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn status_parses_submodule_config_once() {
+    submodule_config_reads("worktree", &["status", "-s", "--", "sub", "other"]);
+}
+
+#[test]
+fn status_reads_index_submodule_config_once() {
+    submodule_config_reads("index", &["status", "-s", "--", "sub", "other"]);
+}
+
+#[test]
+fn status_reads_head_submodule_config_once() {
+    submodule_config_reads("HEAD", &["status", "-s", "--", "sub", "other"]);
+}
+
+#[test]
+fn diff_parses_submodule_config_once() {
+    submodule_config_reads("worktree", &["diff", "--", "sub", "other"]);
+}
+
+#[test]
+fn diff_reads_index_submodule_config_once() {
+    submodule_config_reads("index", &["diff", "--", "sub", "other"]);
+}
+
+#[test]
+fn diff_reads_head_submodule_config_once() {
+    submodule_config_reads("HEAD", &["diff", "--", "sub", "other"]);
+}

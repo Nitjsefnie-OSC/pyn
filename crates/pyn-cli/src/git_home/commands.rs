@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use pyn_git::Refspec;
 use pyn_gitwork::{
-    Change, Conflict, Entry, Head, Kind, Pathspec, StatusEntry, SubmoduleIgnore, fs_path,
-    hash_worktree_file,
+    Change, Conflict, Entry, Head, Kind, Pathspec, StatusEntry, SubmoduleIgnore, Submodules,
+    fs_path, hash_worktree_file,
 };
 use pyn_object::ObjectId;
 
@@ -459,7 +459,12 @@ fn entry_blob(e: &Entry) -> Option<Blob> {
     })
 }
 
-fn disk_blob(git: &GitHome, path: &[u8], recorded: Option<&Entry>) -> Result<Option<Blob>> {
+fn disk_blob(
+    git: &GitHome,
+    modules: &Submodules<'_>,
+    path: &[u8],
+    recorded: Option<&Entry>,
+) -> Result<Option<Blob>> {
     let file = fs_path(git.repo.root()?, path);
     let Ok(meta) = std::fs::symlink_metadata(&file) else {
         return Ok(None);
@@ -468,10 +473,7 @@ fn disk_blob(git: &GitHome, path: &[u8], recorded: Option<&Entry>) -> Result<Opt
         && let Some(e) = recorded.filter(|e| e.mode == pyn_object::FileMode::Gitlink)
     {
         return Ok(Some(
-            match git
-                .repo
-                .submodule_status(path, e.id, SubmoduleIgnore::Untracked)?
-            {
+            match modules.status(path, e.id, SubmoduleIgnore::Untracked)? {
                 Some(s) => Blob::gitlink(s.head.to_hex(), s.modified || s.untracked),
                 None => Blob::gitlink(e.id.to_hex(), false),
             },
@@ -494,6 +496,15 @@ pub(super) fn add_changes(
     new: &mut Tree,
     changes: &[Change],
 ) -> Result<()> {
+    add_changes_with_submodules(&git.repo.submodules(), old, new, changes)
+}
+
+fn add_changes_with_submodules(
+    modules: &Submodules<'_>,
+    old: &mut Tree,
+    new: &mut Tree,
+    changes: &[Change],
+) -> Result<()> {
     for c in changes {
         let path = path_string(&c.path);
         if let Some(b) = c.old.as_ref().and_then(entry_blob) {
@@ -503,10 +514,10 @@ pub(super) fn add_changes(
             new.insert(path, b);
         }
     }
-    filter_gitlinks(git, old, new)
+    filter_gitlinks(modules, old, new)
 }
 
-fn filter_gitlinks(git: &GitHome, old: &mut Tree, new: &mut Tree) -> Result<()> {
+fn filter_gitlinks(modules: &Submodules<'_>, old: &mut Tree, new: &mut Tree) -> Result<()> {
     let mut ignored = Vec::new();
     let paths: BTreeSet<&String> = old.keys().chain(new.keys()).collect();
     for path in paths {
@@ -515,10 +526,7 @@ fn filter_gitlinks(git: &GitHome, old: &mut Tree, new: &mut Tree) -> Result<()> 
             .into_iter()
             .chain(new.get(path))
             .all(Blob::is_gitlink)
-            && git
-                .repo
-                .submodule_ignore(path.as_bytes(), SubmoduleIgnore::Untracked)?
-                == SubmoduleIgnore::All
+            && modules.ignore(path.as_bytes(), SubmoduleIgnore::Untracked)? == SubmoduleIgnore::All
         {
             ignored.push(path.clone());
         }
@@ -615,6 +623,7 @@ fn diff(
     let only = repo_paths(git, cwd, &[loose.as_slice(), paths].concat())?;
     let spec = Pathspec::new(only.iter().map(|p| p.as_bytes().to_vec()));
     let repo = &git.repo;
+    let modules = repo.submodules();
     let (mut old, mut new) = (Tree::new(), Tree::new());
     match revs.as_slice() {
         [] | [_] if cached => {
@@ -644,7 +653,7 @@ fn diff(
         [] => {
             let index = repo.read_index()?;
             let leaves = repo.index_leaves(&index);
-            for (path, kind) in repo.unstaged_changes(&index)? {
+            for (path, kind) in repo.unstaged_changes_with_submodules(&index, &modules)? {
                 if !spec.matches(&path)
                     || !matches!(kind, Kind::Modified | Kind::Deleted | Kind::TypeChange)
                 {
@@ -654,7 +663,7 @@ fn diff(
                 if let Some(b) = leaves.get(&path).and_then(entry_blob) {
                     old.insert(name.clone(), b);
                 }
-                if let Some(b) = disk_blob(git, &path, leaves.get(&path))? {
+                if let Some(b) = disk_blob(git, &modules, &path, leaves.get(&path))? {
                     new.insert(name, b);
                 }
             }
@@ -664,7 +673,7 @@ fn diff(
             let committed = repo.flatten(Some(&tree), &spec)?;
             let index = repo.read_index()?;
             let leaves = repo.index_leaves(&index);
-            let unstaged = repo.unstaged_changes(&index)?;
+            let unstaged = repo.unstaged_changes_with_submodules(&index, &modules)?;
             let paths: BTreeSet<&Vec<u8>> = committed.keys().chain(leaves.keys()).collect();
             for path in paths.into_iter().filter(|p| spec.matches(p)) {
                 let name = path_string(path);
@@ -673,7 +682,7 @@ fn diff(
                 }
                 let current = match (leaves.get(path), unstaged.contains_key(path)) {
                     (Some(e), false) => entry_blob(e),
-                    _ => disk_blob(git, path, leaves.get(path))?,
+                    _ => disk_blob(git, &modules, path, leaves.get(path))?,
                 };
                 if let Some(b) = current {
                     new.insert(name, b);
@@ -682,8 +691,8 @@ fn diff(
         }
         [a, b] => {
             let (ta, tb) = (repo.commit(a)?.tree, repo.commit(b)?.tree);
-            add_changes(
-                git,
+            add_changes_with_submodules(
+                &modules,
                 &mut old,
                 &mut new,
                 &repo.diff_trees(Some(&ta), Some(&tb), &spec)?,
@@ -691,7 +700,7 @@ fn diff(
         }
         _ => unreachable!("at most two revisions are taken"),
     }
-    filter_gitlinks(git, &mut old, &mut new)?;
+    filter_gitlinks(&modules, &mut old, &mut new)?;
     let mut out = String::new();
     let differs = diff::compare(git, &old, &new, &only, format, &mut out)?;
     if !quiet {

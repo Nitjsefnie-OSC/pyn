@@ -3,14 +3,19 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use common::gitfix::*;
 use pyn_git::{Index, Repository};
 use pyn_object::Algorithm;
+
+const CLEANUP_PATH_ENV: &str = "PYN_GIT_FIXTURE_CLEANUP_PATH";
 
 fn source() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/git")
@@ -184,6 +189,46 @@ fn parallel_readers_share_one_private_extraction() {
     fs::write(repo.main.join("README.md"), "changed\n").unwrap();
     assert_eq!(fixtures(), *root);
     assert_eq!(snapshot(root), before);
+}
+
+#[test]
+fn extracted_fixtures_are_removed_when_the_process_exits() {
+    let parent_root = fixtures();
+    let tmp = tempfile::tempdir().unwrap();
+    let path_file = tmp.path().join("extraction-path");
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "fixture_cleanup_child"])
+        .env(CLEANUP_PATH_ENV, &path_file)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = fs::read(path_file).unwrap();
+    assert!(!path.is_empty());
+    let child_root = PathBuf::from(OsString::from_vec(path));
+    assert_ne!(child_root, parent_root);
+    assert_eq!(
+        fs::symlink_metadata(&child_root).unwrap_err().kind(),
+        io::ErrorKind::NotFound,
+        "{} should have been removed at child exit",
+        child_root.display()
+    );
+    assert!(parent_root.join("worktree").is_dir());
+}
+
+#[test]
+fn fixture_cleanup_child() {
+    let Some(path_file) = std::env::var_os(CLEANUP_PATH_ENV) else {
+        return;
+    };
+    let root = std::thread::spawn(fixtures).join().unwrap();
+    assert_eq!(fixtures(), root);
+    assert!(root.join("worktree").is_dir());
+    fs::write(path_file, root.as_os_str().as_bytes()).unwrap();
 }
 
 #[test]

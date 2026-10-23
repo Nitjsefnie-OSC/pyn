@@ -29,9 +29,20 @@ pub(crate) fn extract_archives(from: &Path) -> io::Result<tempfile::TempDir> {
 
 pub fn fixtures() -> PathBuf {
     static ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+    extern "C" fn cleanup() {
+        if let Some(root) = ROOT.get() {
+            let _ = fs::remove_dir_all(root.path());
+        }
+    }
     ROOT.get_or_init(|| {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/git");
-        extract_archives(&source).expect("unpack archived git fixtures")
+        let tmp = extract_archives(&source).expect("unpack archived git fixtures");
+        // The exit hook runs after the harness has joined its test threads.
+        assert!(
+            shutdown_hooks::add_shutdown_hook(cleanup),
+            "register git fixture cleanup"
+        );
+        tmp
     })
     .path()
     .to_path_buf()

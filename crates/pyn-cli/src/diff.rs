@@ -57,6 +57,10 @@ impl Blob {
         matches!(self.source, Source::Gitlink { .. })
     }
 
+    fn is_regular(&self) -> bool {
+        !self.is_gitlink() && self.mode != api::FileMode::Symlink
+    }
+
     fn mode(&self) -> &str {
         if self.is_gitlink() {
             "160000"
@@ -299,10 +303,6 @@ struct Pair<'a> {
     renamed: Option<u64>,
 }
 
-fn is_link(blob: &Blob) -> bool {
-    blob.mode == api::FileMode::Symlink
-}
-
 const MAX_SCORE: u64 = 60_000;
 const MIN_SCORE: u64 = 30_000;
 
@@ -367,7 +367,9 @@ fn detect_renames<'a>(
         let mut same: Vec<&String> = dels
             .iter()
             .filter(|(p, b)| {
-                !taken.contains(p.as_str()) && b.hash == to.hash && is_link(b) == is_link(to)
+                !taken.contains(p.as_str())
+                    && b.hash == to.hash
+                    && ((b.is_regular() && to.is_regular()) || b.mode() == to.mode())
             })
             .map(|(p, _)| *p)
             .collect();
@@ -379,11 +381,11 @@ fn detect_renames<'a>(
     }
     let rest_adds: Vec<_> = adds
         .iter()
-        .filter(|(p, _)| !pairs.contains_key(p.as_str()))
+        .filter(|(p, b)| b.is_regular() && !pairs.contains_key(p.as_str()))
         .collect();
     let rest_dels: Vec<_> = dels
         .iter()
-        .filter(|(p, _)| !taken.contains(p.as_str()))
+        .filter(|(p, b)| b.is_regular() && !taken.contains(p.as_str()))
         .collect();
     if rest_adds.is_empty() || rest_dels.is_empty() {
         return Ok(pairs);
@@ -392,16 +394,13 @@ fn detect_renames<'a>(
     for (p, b) in &rest_dels {
         let data = bytes(backend, p, b, false)?;
         let counts = chunk_counts(&data);
-        sources.push((p.as_str(), is_link(b), data, counts));
+        sources.push((p.as_str(), data, counts));
     }
     let mut scored: Vec<(u64, bool, &str, &str)> = Vec::new();
     for (dst, to) in &rest_adds {
         let data = bytes(backend, dst, to, false)?;
         let counts = chunk_counts(&data);
-        for (src, link, sdata, scounts) in &sources {
-            if *link != is_link(to) {
-                continue;
-            }
+        for (src, sdata, scounts) in &sources {
             let score = similarity(sdata, &data, scounts, &counts);
             if score >= MIN_SCORE {
                 scored.push((score, base(src) != base(dst), src, dst.as_str()));

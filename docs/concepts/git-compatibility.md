@@ -762,14 +762,15 @@ offset recorded in the commit, as git does.
 
 On a git home, recorded submodules are inspected read-only for `status` and `diff`: a different submodule `HEAD`,
 tracked edits (including staged edits), and untracked content are distinguished. Short status uses `M`, `m` and `?`
-respectively; porcelain and the default table report these as modified. An uninitialized directory is clean;
+respectively; porcelain and the default table report these as modified. Dirt in recorded nested submodules keeps
+its tracked or untracked category at the enclosing submodule. An uninitialized directory is clean;
 a missing checkout is deleted. A submodule's files are not listed as superproject files.
 
 On a git home, gitlink diffs use full-hex `Subproject commit <id>` lines, with `-dirty` for visible worktree dirt.
 `--cached` compares recorded commits only. `submodule.<name>.ignore` in git config overrides the setting in the
 worktree's `.gitmodules`, then `diff.ignoreSubmodules`, then the command default (status includes untracked
-content; diff ignores untracked-only content). `none`, `untracked`, `dirty` and `all` select what is ignored;
-staged gitlinks remain visible in status even under `all`. Submodule initialization and updates are not built.
+content; diff ignores untracked-only content, including in nested submodules). `none`, `untracked`, `dirty` and `all`
+select what is ignored; staged gitlinks remain visible in status even under `all`. Submodule initialization and updates are not built.
 
 Differences from git, all deliberate or not yet done:
 

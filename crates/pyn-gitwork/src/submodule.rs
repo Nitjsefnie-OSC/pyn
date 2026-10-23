@@ -95,16 +95,16 @@ impl Repo {
             untracked: false,
         };
         if ignore != SubmoduleIgnore::Dirty {
-            let status = sub.status()?;
-            state.modified = status
-                .entries
-                .iter()
-                .any(|e| e.staged.is_some() || e.unstaged.is_some_and(|k| k != Kind::Untracked));
-            state.untracked = ignore != SubmoduleIgnore::Untracked
-                && status
-                    .entries
-                    .iter()
-                    .any(|e| e.unstaged == Some(Kind::Untracked));
+            for e in sub.status()?.entries {
+                state.modified |= e.staged.is_some()
+                    || match e.submodule {
+                        Some(nested) => nested.new_commits || nested.modified,
+                        None => e.unstaged.is_some_and(|k| k != Kind::Untracked),
+                    };
+                state.untracked |=
+                    e.unstaged == Some(Kind::Untracked) || e.submodule.is_some_and(|s| s.untracked);
+            }
+            state.untracked &= ignore != SubmoduleIgnore::Untracked;
         }
         Ok(Some(state))
     }

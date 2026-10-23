@@ -82,6 +82,41 @@ impl Fixture {
         fs::write(self.repo.join(".gitmodules"), Self::modules(modules)).unwrap();
     }
 
+    fn nested(&self, format: &str) -> PathBuf {
+        let nested = self.sub.join("nested");
+        init(&nested, format, false);
+        let first = commit(&nested, "file", b"one\n", "one");
+        commit(&nested, "file", b"two\n", "two");
+        run(&nested, &["checkout", "-q", &first]);
+        fs::write(
+            self.sub.join(".gitmodules"),
+            "[submodule \"inner\"]\n path = nested\n url = ../inner\n",
+        )
+        .unwrap();
+        run(&self.sub, &["add", ".gitmodules"]);
+        run(
+            &self.sub,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{first},nested"),
+            ],
+        );
+        run(&self.sub, &["commit", "-qm", "record nested"]);
+        let head = run(&self.sub, &["rev-parse", "HEAD"]);
+        run(
+            &self.repo,
+            &[
+                "update-index",
+                "--cacheinfo",
+                &format!("160000,{},sub", head.trim()),
+            ],
+        );
+        run(&self.repo, &["commit", "-qm", "record nested checkout"]);
+        nested
+    }
+
     fn state(&self, state: &str) {
         match state {
             "clean" => {}
@@ -594,6 +629,114 @@ fn merge_stat_gitlinks() {
                 String::from_utf8_lossy(&got.stderr)
             );
             assert_eq!(String::from_utf8_lossy(&got.stdout), want);
+        });
+    }
+}
+
+#[test]
+fn nested_untracked_status() {
+    for format in FORMATS {
+        for gitfile in [false, true] {
+            let f = Fixture::new(format, gitfile);
+            let nested = f.nested(format);
+            f.same(&["status", "-s"]);
+            fs::write(nested.join("new"), "untracked\n").unwrap();
+            f.same(&["status", "-s"]);
+            f.same(&["status", "--porcelain"]);
+            f.table();
+            fs::write(nested.join("file"), "tracked\n").unwrap();
+            f.same(&["status", "-s"]);
+            run(&nested, &["add", "file"]);
+            f.same(&["status", "-s"]);
+            run(&nested, &["commit", "-qm", "nested commit"]);
+            f.same(&["status", "-s"]);
+        }
+    }
+}
+
+#[test]
+fn nested_untracked_default_diff() {
+    for format in FORMATS {
+        for gitfile in [false, true] {
+            let f = Fixture::new(format, gitfile);
+            let nested = f.nested(format);
+            fs::write(nested.join("new"), "untracked\n").unwrap();
+            f.same(&["diff"]);
+            f.same(&["diff", "HEAD"]);
+        }
+    }
+}
+
+#[test]
+fn nested_untracked_ignore_config() {
+    for format in FORMATS {
+        for gitfile in [false, true] {
+            let f = Fixture::new(format, gitfile);
+            let nested = f.nested(format);
+            fs::write(nested.join("new"), "untracked\n").unwrap();
+            for ignore in ["untracked", "none", "dirty", "all"] {
+                f.configure(None, Some(ignore), None);
+                f.same(&["status", "-s"]);
+                f.same(&["status", "--porcelain"]);
+                f.table();
+                f.same(&["diff"]);
+                f.same(&["diff", "HEAD"]);
+            }
+            fs::write(nested.join("file"), "tracked\n").unwrap();
+            for ignore in ["untracked", "none", "dirty", "all"] {
+                f.configure(None, Some(ignore), None);
+                f.same(&["status", "-s"]);
+                f.same(&["diff"]);
+            }
+            run(&nested, &["checkout", "--", "file"]);
+            run(&nested, &["checkout", "-q", "main"]);
+            for ignore in ["untracked", "none", "dirty", "all"] {
+                f.configure(None, Some(ignore), None);
+                f.same(&["status", "-s"]);
+                f.same(&["diff"]);
+            }
+        }
+    }
+}
+
+#[test]
+fn merge_stat_preserves_gitlink_kind() {
+    for replacement in ["file", "gitlink"] {
+        each(|f| {
+            let id = run(&f.repo, &["rev-parse", "HEAD:sub"]);
+            f.state("uninitialized");
+            run(&f.repo, &["checkout", "-qb", "side"]);
+            run(&f.repo, &["update-index", "--force-remove", "sub"]);
+            if replacement == "file" {
+                fs::write(
+                    f.repo.join("note"),
+                    format!("Subproject commit {}\n", id.trim()),
+                )
+                .unwrap();
+                run(&f.repo, &["add", "note"]);
+            } else {
+                run(
+                    &f.repo,
+                    &[
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        &format!("160000,{},renamed", id.trim()),
+                    ],
+                );
+            }
+            run(&f.repo, &["commit", "-qm", "replace gitlink"]);
+            run(&f.repo, &["checkout", "-q", "main"]);
+            let oracle = f.repo.parent().unwrap().join("oracle");
+            gitfix::copy_tree(&f.repo, &oracle);
+            let want = run(&oracle, &["merge", "side"]);
+            let got = f.pyn(&["merge", "side"]);
+            assert!(
+                got.status.success(),
+                "{}",
+                String::from_utf8_lossy(&got.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&got.stdout), want, "{replacement}");
         });
     }
 }

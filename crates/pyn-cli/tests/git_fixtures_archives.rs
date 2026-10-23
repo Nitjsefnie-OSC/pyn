@@ -203,15 +203,40 @@ fn every_archive_is_required() {
 
 #[test]
 fn invalid_compression_and_invalid_tar_are_refused() {
-    for bytes in [
-        b"invalid zstd".to_vec(),
-        zstd::encode_all(&b"invalid tar"[..], 0).unwrap(),
-    ] {
-        let source_dir = tempfile::tempdir().unwrap();
-        for name in archive_names() {
-            fs::write(source_dir.path().join(name), &bytes).unwrap();
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(1);
+    header.set_mode(0o644);
+    header.set_mtime(0);
+    builder
+        .append_data(&mut header, "partial.txt", &b"x"[..])
+        .unwrap();
+    // Keep the valid member before the builder adds end-of-archive blocks.
+    let mut partial = builder.get_ref().clone();
+    partial.extend_from_slice(b"truncated next header");
+    let corruptions = [
+        ("invalid zstd", b"invalid zstd".to_vec()),
+        (
+            "invalid tar",
+            zstd::encode_all(&b"invalid tar"[..], 0).unwrap(),
+        ),
+        ("partial tar", zstd::encode_all(&partial[..], 0).unwrap()),
+    ];
+    for selected in archive_names() {
+        for (kind, bytes) in &corruptions {
+            let source_dir = tempfile::tempdir().unwrap();
+            for name in archive_names() {
+                fs::copy(source().join(name), source_dir.path().join(name)).unwrap();
+            }
+            fs::write(source_dir.path().join(selected), bytes).unwrap();
+            assert!(
+                extract_archives(source_dir.path()).is_err(),
+                "{selected}: {kind}"
+            );
+            assert!(
+                !source_dir.path().join("worktree").exists(),
+                "{selected}: {kind}"
+            );
         }
-        assert!(extract_archives(source_dir.path()).is_err());
-        assert!(!source_dir.path().join("worktree").exists());
     }
 }

@@ -40,6 +40,13 @@ impl Repo {
             Err(e) => return Err(io_at(&file)(e)),
         }
         let index = self.read_index()?;
+        if index
+            .entries
+            .iter()
+            .any(|e| e.stage > 0 && e.path.as_slice() == b".gitmodules")
+        {
+            return Ok(Config::default());
+        }
         let id = match index
             .entries
             .iter()

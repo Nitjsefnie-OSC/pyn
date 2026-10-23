@@ -773,6 +773,7 @@ worktree's `.gitmodules` (falling back to the index, then `HEAD`, when that file
 `diff.ignoreSubmodules`, then the command default (status includes untracked
 content; diff ignores untracked-only content, including in nested submodules). `none`, `untracked`, `dirty` and `all`
 select what is ignored; staged gitlinks remain visible in status even under `all`. Submodule initialization and updates are not built.
+With no worktree `.gitmodules`, an unmerged index entry for that file disables the recorded configuration fallback.
 
 Differences from git, all deliberate or not yet done:
 

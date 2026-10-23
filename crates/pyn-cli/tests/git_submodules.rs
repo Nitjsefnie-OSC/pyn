@@ -796,3 +796,57 @@ fn unborn_submodule_content() {
         });
     }
 }
+
+#[test]
+fn unmerged_gitmodules_does_not_use_head() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    each(|f| {
+        f.configure(None, None, Some("all"));
+        run(&f.repo, &["add", ".gitmodules"]);
+        run(&f.repo, &["commit", "-qm", "record module settings"]);
+        let id = run(&f.repo, &["rev-parse", "HEAD:.gitmodules"]);
+        let conflict = |path: &str| {
+            run(&f.repo, &["update-index", "--force-remove", path]);
+            let entries: String = (1..=3)
+                .map(|stage| format!("100644 {} {stage}\t{path}\n", id.trim()))
+                .collect();
+            let mut child = git(&f.repo)
+                .args(["update-index", "--index-info"])
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(entries.as_bytes())
+                .unwrap();
+            assert!(child.wait().unwrap().success());
+        };
+        conflict(".gitmodules");
+        fs::remove_file(f.repo.join(".gitmodules")).unwrap();
+        f.state("tracked");
+        f.same(&["status", "-s", "--", "sub"]);
+        f.same(&["status", "--porcelain", "--", "sub"]);
+        f.table();
+        f.same(&["diff", "--", "sub"]);
+        f.same(&["diff", "HEAD", "--", "sub"]);
+
+        run(&f.repo, &["update-index", "--force-remove", ".gitmodules"]);
+        run(
+            &f.repo,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{},.gitmodules", id.trim()),
+            ],
+        );
+        conflict("other");
+        f.same(&["status", "-s", "--", "sub"]);
+        f.table();
+        f.same(&["diff", "--", "sub"]);
+    });
+}

@@ -383,6 +383,16 @@ pub(super) fn stage_file(
     let file = fs_path(git.repo.root()?, path);
     let meta =
         std::fs::symlink_metadata(&file).with_context(|| format!("reading {}", file.display()))?;
+    if meta.is_dir() && existing.is_some_and(|e| e.mode == GITLINK) {
+        let sub = pyn_gitwork::Repo::open(&file, None, None)?;
+        let id = sub
+            .head_commit()?
+            .context("submodule does not have a commit checked out")?;
+        let mut entry = IndexEntry::new(path, GITLINK, id);
+        stat_fields(&mut entry, &meta);
+        entry.size = 0;
+        return Ok(entry);
+    }
     let mut mode = worktree_mode(&meta).with_context(|| {
         format!(
             "'{}' is not a regular file or a symbolic link",

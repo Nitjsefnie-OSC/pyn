@@ -884,7 +884,8 @@ while it was working; an existing `index.lock` stops the command.
 `core.filemode=false` keeps the index's mode. Ignore rules are `.gitignore` in every folder, `.git/info/exclude` and the global
 excludes file; a file or folder named on the command line that they hide is refused with git's message and exit status `1`
 (the other paths are still staged) unless `-f` is given, and a hidden file met while walking a folder is skipped silently. A
-nested git repository is skipped with a warning (pyn adds no submodules), and `.pyn/local_only` is never added. An unmerged
+nested git repository is skipped with a warning. An existing submodule is staged as a gitlink (`160000`) pointing to its
+current `HEAD`; its files are not staged in the superproject. `.pyn/local_only` is never added. An unmerged
 path is staged as the file is, which resolves it.
 
 **`commit`.** A linear commit on the current branch:

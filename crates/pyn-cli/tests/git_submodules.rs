@@ -850,3 +850,69 @@ fn unmerged_gitmodules_does_not_use_head() {
         f.same(&["diff", "--", "sub"]);
     });
 }
+
+#[test]
+fn add_modified_gitlinks() {
+    for args in [
+        vec!["add", "."],
+        vec!["add", "-A"],
+        vec!["add", "sub"],
+        vec!["add", "-u"],
+        vec!["add", "-f", "."],
+    ] {
+        each(|f| {
+            f.state("backward");
+            fs::write(f.repo.join("newf"), "new\n").unwrap();
+            let oracle = f.repo.parent().unwrap().join("oracle");
+            gitfix::copy_tree(&f.repo, &oracle);
+            run(&oracle, &args);
+            let want = run(&oracle, &["diff", "--cached", "--name-status"]);
+            eprintln!("git {args:?}: {want:?}");
+            assert!(want.contains("M\tsub\n"), "{want}");
+            let got = f.pyn(&args);
+            assert_eq!(
+                got.status.code(),
+                Some(0),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&got.stderr)
+            );
+            assert_eq!(run(&f.repo, &["diff", "--cached", "--name-status"]), want);
+            assert_eq!(run(&f.repo, &["write-tree"]), run(&oracle, &["write-tree"]));
+        });
+    }
+}
+
+#[test]
+fn commit_all_modified_gitlinks() {
+    each(|f| {
+        f.state("backward");
+        fs::write(f.repo.join("newf"), "new\n").unwrap();
+        run(&f.repo, &["add", "newf"]);
+        run(&f.repo, &["config", "user.name", "t"]);
+        run(&f.repo, &["config", "user.email", "t@example.com"]);
+        let oracle = f.repo.parent().unwrap().join("oracle");
+        gitfix::copy_tree(&f.repo, &oracle);
+        run(&oracle, &["commit", "-qam", "stage tracked"]);
+        let want = run(
+            &oracle,
+            &["diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"],
+        );
+        eprintln!("git commit -a: {want:?}");
+        assert!(
+            want.contains("M\tsub\n") && want.contains("A\tnewf\n"),
+            "{want}"
+        );
+        let got = f.pyn(&["commit", "-qam", "stage tracked"]);
+        assert_eq!(
+            got.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&got.stderr)
+        );
+        assert_eq!(
+            run(&f.repo, &["rev-parse", "HEAD^{tree}"]),
+            run(&oracle, &["rev-parse", "HEAD^{tree}"])
+        );
+    });
+}
+

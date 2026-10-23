@@ -43,15 +43,16 @@ pub(super) fn show(git: &GitHome, args: ShowArgs) -> Result<()> {
     if !only_untracked {
         let base = commit_tree(git, &stash.parents[0])?;
         let changes = git.repo.diff_trees(Some(&base), Some(&stash.tree), &all)?;
-        add_changes(&mut old, &mut new, &changes);
+        add_changes(git, &mut old, &mut new, &changes)?;
     }
     if untracked && let Some(u) = stash.parents.get(2) {
         let tree = commit_tree(git, u)?;
         add_changes(
+            git,
             &mut old,
             &mut new,
             &git.repo.diff_trees(None, Some(&tree), &all)?,
-        );
+        )?;
     }
     let f = &args.format;
     let flagged = f.stat || f.shortstat || f.name_only || f.name_status || f.check;

@@ -259,7 +259,7 @@ fn show_stat(
     }
     let (mut before, mut after) = (Tree::new(), Tree::new());
     let changes = git.repo.diff_trees(old, Some(new), &Pathspec::default())?;
-    add_changes(&mut before, &mut after, &changes);
+    add_changes(git, &mut before, &mut after, &changes)?;
     let graph = config
         .get("diff.statgraphwidth")
         .and_then(|w| w.parse::<usize>().ok());

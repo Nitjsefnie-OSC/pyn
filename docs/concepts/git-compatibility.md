@@ -143,7 +143,8 @@ Commands people reach for that are not in the daily set.
 | `git fsck` | `pyn verify [<path>]` | different | Checks every revision's hash and its link to the one before, and the audit log's chain. Silent and exit 0 when intact, as git; otherwise a `PROBLEM`, `WHAT`, `PATH` table and exit 1. `-v` / `--verbose` also prints what was checked. See [integrity](integrity.md). |
 | `git reflog [show\|list\|exists\|expire\|delete]` | `pyn reflog ...` on a git home | git home only | See [Reflogs](#reflogs). On a pyn server it prints the git-command message; the closest analogue there is `pyn audit`, an append-only log of lock, revision and access events, filtered with `--path`, `--actor`, `--action`, `--before`, `--limit` and permission-gated (`view_audit`). |
 | `git blame`, `git annotate` | none | unsupported | Git-command message. Line history needs merge-capable text history; not scheduled. |
-| `git shortlog`, `git describe`, `git rev-parse`, `git archive`, `git bundle`, `git format-patch`, `git am`, `git apply`, `git notes`, `git bisect`, `git worktree`, `git submodule`, `git gc`, `git fsck` | none | unsupported | `pyn: '<cmd>' is not a pyn command` (`1`). Only the commands in the git-only list print the "git command pyn does not support yet" message, so these read as unknown until that list is widened (#223). |
+| `git submodule` | none | unsupported | Submodule lifecycle commands are not built. On a git home, `status` and `diff` inspect recorded gitlinks and initialized submodule checkouts without changing them; see [On a git home](#on-a-git-home). |
+| `git shortlog`, `git describe`, `git rev-parse`, `git archive`, `git bundle`, `git format-patch`, `git am`, `git apply`, `git notes`, `git bisect`, `git worktree`, `git gc`, `git fsck` | none | unsupported | `pyn: '<cmd>' is not a pyn command` (`1`). Only the commands in the git-only list print the "git command pyn does not support yet" message, so these read as unknown until that list is widened (#223). |
 
 ## Branching and merging
 
@@ -759,12 +760,22 @@ more digits, and any of `~N`, `^` and `^N` after one. Reflog forms (`HEAD@{2}`, 
 described in [Reflogs](#reflogs). SHA-1 and SHA-256 repositories are both read. Dates print in the
 offset recorded in the commit, as git does.
 
+On a git home, recorded submodules are inspected read-only for `status` and `diff`: a different submodule `HEAD`,
+tracked edits (including staged edits), and untracked content are distinguished. Short status uses `M`, `m` and `?`
+respectively; porcelain and the default table report these as modified. An uninitialized directory is clean;
+a missing checkout is deleted. A submodule's files are not listed as superproject files.
+
+On a git home, gitlink diffs use full-hex `Subproject commit <id>` lines, with `-dirty` for visible worktree dirt.
+`--cached` compares recorded commits only. `submodule.<name>.ignore` in git config overrides the setting in the
+worktree's `.gitmodules`, then `diff.ignoreSubmodules`, then the command default (status includes untracked
+content; diff ignores untracked-only content). `none`, `untracked`, `dirty` and `all` select what is ignored;
+staged gitlinks remain visible in status even under `all`. Submodule initialization and updates are not built.
+
 Differences from git, all deliberate or not yet done:
 
 - Files are read as they are on disk: `core.autocrlf`, `.gitattributes` filters and `core.eol` are not applied, so a
   repository that depends on them can show files as modified that git does not.
 - No rename or copy detection: a rename is a delete and an add.
-- Submodule entries are not compared, and a submodule folder is not descended into.
 - `log` and `show` print no ref decorations (`%d` in a `log` template does); commit abbreviations are 7 digits and are not
   lengthened to stay unique.
 - A nested repository that the index does not track is one untracked `dir/`.

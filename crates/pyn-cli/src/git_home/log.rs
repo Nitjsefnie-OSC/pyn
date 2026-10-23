@@ -404,7 +404,7 @@ fn diff_body(
     let changes = git
         .repo
         .diff_trees(parent_tree.as_ref(), Some(&c.tree), spec)?;
-    add_changes(&mut old, &mut new, &changes);
+    add_changes(git, &mut old, &mut new, &changes)?;
     diff::sections(git, &old, &new, &[], parts)
 }
 

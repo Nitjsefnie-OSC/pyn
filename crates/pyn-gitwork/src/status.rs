@@ -13,6 +13,7 @@ use crate::ignore::{Ignore, Level, parse_rules};
 use crate::pathspec::Pathspec;
 use crate::repo::{Head, Repo};
 use crate::tree::Entry;
+use crate::{SubmoduleIgnore, SubmoduleStatus};
 
 const GITLINK: u32 = 0o160000;
 const SYMLINK: u32 = 0o120000;
@@ -37,6 +38,7 @@ pub struct StatusEntry {
     pub unstaged: Option<Kind>,
     /// Which index stages an unmerged path has.
     pub conflict: Option<Conflict>,
+    pub submodule: Option<SubmoduleStatus>,
 }
 
 /// The index stages present for an unmerged path.
@@ -157,6 +159,7 @@ fn row(rows: &mut BTreeMap<Vec<u8>, StatusEntry>, path: Vec<u8>) -> &mut StatusE
         staged: None,
         unstaged: None,
         conflict: None,
+        submodule: None,
     })
 }
 
@@ -183,6 +186,17 @@ impl Repo {
         }
         for (path, kind) in self.unstaged_changes(&index)? {
             row(&mut rows, path).unstaged = Some(kind);
+        }
+        for e in index
+            .entries
+            .iter()
+            .filter(|e| e.stage == 0 && e.mode == GITLINK)
+        {
+            if let Some(row) = rows.get_mut(&e.path)
+                && row.unstaged == Some(Kind::Modified)
+            {
+                row.submodule = self.submodule_status(&e.path, e.id, SubmoduleIgnore::None)?;
+            }
         }
         for e in index.entries.iter().filter(|e| e.stage > 0) {
             let c = row(&mut rows, e.path.clone())
@@ -288,6 +302,11 @@ impl Repo {
         if e.assume_valid || e.skip_worktree {
             return Ok(None);
         }
+        if e.mode == GITLINK
+            && self.submodule_ignore(&e.path, SubmoduleIgnore::None)? == SubmoduleIgnore::All
+        {
+            return Ok(None);
+        }
         let path = fs_path(root, &e.path);
         let meta = match std::fs::symlink_metadata(&path) {
             Ok(m) => m,
@@ -296,7 +315,9 @@ impl Repo {
         };
         if e.mode == GITLINK {
             return Ok(if meta.is_dir() {
-                None
+                self.submodule_status(&e.path, e.id, SubmoduleIgnore::None)?
+                    .filter(SubmoduleStatus::changed)
+                    .map(|_| Kind::Modified)
             } else {
                 Some(Kind::TypeChange)
             });

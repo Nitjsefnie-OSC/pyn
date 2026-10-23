@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use pyn_git::Refspec;
 use pyn_gitwork::{
-    Change, Conflict, Entry, Head, Kind, Pathspec, StatusEntry, fs_path, hash_worktree_file,
+    Change, Conflict, Entry, Head, Kind, Pathspec, StatusEntry, SubmoduleIgnore, fs_path,
+    hash_worktree_file,
 };
 use pyn_object::ObjectId;
 
@@ -286,7 +287,7 @@ pub(super) fn status(git: &GitHome, cwd: &Path, args: &StatusArgs) -> Result<()>
             .transpose()?;
         let prefix = git.ws.repo_prefix(cwd, ".")?;
         let quote_high = git.repo.bool_setting("core.quotePath", true);
-        let rows = short_rows(&status.entries);
+        let rows = short_rows(&status.entries, format);
         return short_status::print(
             &rows,
             branch.as_deref(),
@@ -358,7 +359,7 @@ fn conflict_code(c: Conflict) -> (char, char) {
     }
 }
 
-fn short_rows(entries: &[StatusEntry]) -> Vec<Row> {
+fn short_rows(entries: &[StatusEntry], format: Format) -> Vec<Row> {
     let mut rows = Vec::new();
     for e in entries {
         if let Some(c) = e.conflict {
@@ -380,7 +381,16 @@ fn short_rows(entries: &[StatusEntry]) -> Vec<Row> {
         } else {
             rows.push(Row {
                 x: letter(e.staged),
-                y: letter(e.unstaged),
+                y: match e.submodule {
+                    Some(s) if format == Format::Short && !s.new_commits => {
+                        if s.modified {
+                            'm'
+                        } else {
+                            '?'
+                        }
+                    }
+                    _ => letter(e.unstaged),
+                },
                 path: e.path.clone(),
             });
         }
@@ -439,6 +449,9 @@ fn branch_line(git: &GitHome, head: &Head) -> Result<String> {
 }
 
 fn entry_blob(e: &Entry) -> Option<Blob> {
+    if e.mode == pyn_object::FileMode::Gitlink {
+        return Some(Blob::gitlink(e.id.to_hex(), false));
+    }
     Some(Blob {
         hash: e.id.to_hex(),
         mode: file_mode(e.mode)?,
@@ -446,11 +459,24 @@ fn entry_blob(e: &Entry) -> Option<Blob> {
     })
 }
 
-fn disk_blob(git: &GitHome, path: &[u8]) -> Result<Option<Blob>> {
+fn disk_blob(git: &GitHome, path: &[u8], recorded: Option<&Entry>) -> Result<Option<Blob>> {
     let file = fs_path(git.repo.root()?, path);
     let Ok(meta) = std::fs::symlink_metadata(&file) else {
         return Ok(None);
     };
+    if meta.is_dir()
+        && let Some(e) = recorded.filter(|e| e.mode == pyn_object::FileMode::Gitlink)
+    {
+        return Ok(Some(
+            match git
+                .repo
+                .submodule_status(path, e.id, SubmoduleIgnore::Untracked)?
+            {
+                Some(s) => Blob::gitlink(s.head.to_hex(), s.modified || s.untracked),
+                None => Blob::gitlink(e.id.to_hex(), false),
+            },
+        ));
+    }
     if !meta.is_file() && !meta.file_type().is_symlink() {
         return Ok(None);
     }
@@ -462,7 +488,12 @@ fn disk_blob(git: &GitHome, path: &[u8]) -> Result<Option<Blob>> {
     }))
 }
 
-pub(super) fn add_changes(old: &mut Tree, new: &mut Tree, changes: &[Change]) {
+pub(super) fn add_changes(
+    git: &GitHome,
+    old: &mut Tree,
+    new: &mut Tree,
+    changes: &[Change],
+) -> Result<()> {
     for c in changes {
         let path = path_string(&c.path);
         if let Some(b) = c.old.as_ref().and_then(entry_blob) {
@@ -472,6 +503,31 @@ pub(super) fn add_changes(old: &mut Tree, new: &mut Tree, changes: &[Change]) {
             new.insert(path, b);
         }
     }
+    filter_gitlinks(git, old, new)
+}
+
+fn filter_gitlinks(git: &GitHome, old: &mut Tree, new: &mut Tree) -> Result<()> {
+    let mut ignored = Vec::new();
+    let paths: BTreeSet<&String> = old.keys().chain(new.keys()).collect();
+    for path in paths {
+        if old
+            .get(path)
+            .into_iter()
+            .chain(new.get(path))
+            .all(Blob::is_gitlink)
+            && git
+                .repo
+                .submodule_ignore(path.as_bytes(), SubmoduleIgnore::Untracked)?
+                == SubmoduleIgnore::All
+        {
+            ignored.push(path.clone());
+        }
+    }
+    for path in ignored {
+        old.remove(&path);
+        new.remove(&path);
+    }
+    Ok(())
 }
 
 /// A `a..b` pair, or a leading revision followed by paths; a name that is both a revision and a file is refused.
@@ -598,7 +654,7 @@ fn diff(
                 if let Some(b) = leaves.get(&path).and_then(entry_blob) {
                     old.insert(name.clone(), b);
                 }
-                if let Some(b) = disk_blob(git, &path)? {
+                if let Some(b) = disk_blob(git, &path, leaves.get(&path))? {
                     new.insert(name, b);
                 }
             }
@@ -617,7 +673,7 @@ fn diff(
                 }
                 let current = match (leaves.get(path), unstaged.contains_key(path)) {
                     (Some(e), false) => entry_blob(e),
-                    _ => disk_blob(git, path)?,
+                    _ => disk_blob(git, path, leaves.get(path))?,
                 };
                 if let Some(b) = current {
                     new.insert(name, b);
@@ -627,13 +683,15 @@ fn diff(
         [a, b] => {
             let (ta, tb) = (repo.commit(a)?.tree, repo.commit(b)?.tree);
             add_changes(
+                git,
                 &mut old,
                 &mut new,
                 &repo.diff_trees(Some(&ta), Some(&tb), &spec)?,
-            );
+            )?;
         }
         _ => unreachable!("at most two revisions are taken"),
     }
+    filter_gitlinks(git, &mut old, &mut new)?;
     let mut out = String::new();
     let differs = diff::compare(git, &old, &new, &only, format, &mut out)?;
     if !quiet {
@@ -707,7 +765,7 @@ fn show(
         let changes =
             git.repo
                 .diff_trees(old_tree.as_ref(), Some(&c.tree), &Pathspec::default())?;
-        add_changes(&mut old, &mut new, &changes);
+        add_changes(git, &mut old, &mut new, &changes)?;
         differs = diff::compare(git, &old, &new, &[], format, &mut body)?;
     }
     if diff::has_body(format, differs, &body) || c.parents.len() > 1 {

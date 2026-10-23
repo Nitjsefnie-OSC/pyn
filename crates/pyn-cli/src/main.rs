@@ -448,6 +448,9 @@ struct DiffFormat {
     /// Show only the totals line of the diffstat.
     #[arg(long, conflicts_with_all = ["stat", "name_only", "name_status", "check"])]
     shortstat: bool,
+    /// Show added and deleted line counts per file.
+    #[arg(long, conflicts_with_all = ["stat", "shortstat", "name_only", "name_status", "check"])]
+    numstat: bool,
     /// Ignore whitespace when comparing lines.
     #[arg(short = 'w', long = "ignore-all-space")]
     ignore_all_space: bool,
@@ -470,6 +473,8 @@ impl DiffFormat {
             diff::Kind::Stat
         } else if self.shortstat {
             diff::Kind::ShortStat
+        } else if self.numstat {
+            diff::Kind::NumStat
         } else if self.name_only {
             diff::Kind::NameOnly
         } else if self.name_status {

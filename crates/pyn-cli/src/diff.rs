@@ -85,6 +85,7 @@ pub enum Kind {
     Patch,
     Stat,
     ShortStat,
+    NumStat,
     NameOnly,
     NameStatus,
     /// `--check`: only the whitespace problems in added lines.
@@ -576,7 +577,7 @@ pub fn compare(
                 };
                 let _ = writeln!(out, "{letter}\t{path}");
             }
-            Kind::Patch | Kind::Check | Kind::Stat | Kind::ShortStat => {
+            Kind::Patch | Kind::Check | Kind::Stat | Kind::ShortStat | Kind::NumStat => {
                 if format.kind == Kind::Patch
                     && a.zip(b)
                         .is_some_and(|(a, b)| a.is_gitlink() != b.is_gitlink())
@@ -615,11 +616,28 @@ pub fn compare(
                 }
                 let counts = if c.binary {
                     Counts::Binary(blob_size(backend, path, a)?, blob_size(backend, path, b)?)
+                } else if a
+                    .zip(b)
+                    .is_some_and(|(a, b)| a.is_gitlink() && b.is_gitlink() && a.hash == b.hash)
+                {
+                    Counts::Lines(0, 0)
                 } else {
                     let (x, y) = pyn_diff::line_counts(&c.old, &c.new, format.ignore_ws);
                     Counts::Lines(x, y)
                 };
                 stat_rows.push((path.clone(), counts));
+            }
+        }
+    }
+    if format.kind == Kind::NumStat {
+        for (path, counts) in &stat_rows {
+            match counts {
+                Counts::Lines(a, d) => {
+                    let _ = writeln!(out, "{a}\t{d}\t{path}");
+                }
+                Counts::Binary(..) => {
+                    let _ = writeln!(out, "-\t-\t{path}");
+                }
             }
         }
     }

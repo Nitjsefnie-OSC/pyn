@@ -1021,3 +1021,32 @@ fn diff_reads_index_submodule_config_once() {
 fn diff_reads_head_submodule_config_once() {
     submodule_config_reads("HEAD", &["diff", "--", "sub", "other"]);
 }
+
+fn gitlink_stats(option: &str) {
+    for state in ["clean", "forward"] {
+        each(|f| {
+            f.state(state);
+            f.state("tracked");
+            f.state("untracked");
+            let want = run(&f.repo, &["diff", option, "--", "sub"]);
+            eprintln!("git diff {option}, {state}: {want:?}");
+            assert!(!want.is_empty());
+            f.same(&["diff", option, "--", "sub"]);
+        });
+    }
+}
+
+#[test]
+fn dirty_only_gitlink_stat() {
+    gitlink_stats("--stat");
+}
+
+#[test]
+fn dirty_only_gitlink_shortstat() {
+    gitlink_stats("--shortstat");
+}
+
+#[test]
+fn dirty_only_gitlink_numstat() {
+    gitlink_stats("--numstat");
+}

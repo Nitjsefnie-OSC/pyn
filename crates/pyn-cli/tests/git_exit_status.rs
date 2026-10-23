@@ -198,18 +198,6 @@ const DIVERGENT: &[(&str, &str)] = &[
         "gap: outside a repository asks for a server (128), git prints --no-index usage (129)",
     ),
     (
-        "Outside: fetch",
-        "gap: outside a repository says a not-supported-yet message (1), git is fatal (128)",
-    ),
-    (
-        "Outside: pull",
-        "gap: outside a repository says a not-supported-yet message (1), git is fatal (128)",
-    ),
-    (
-        "Outside: push",
-        "gap: outside a repository says a not-supported-yet message (1), git is fatal (128)",
-    ),
-    (
         "Dirty: log --bogus",
         "gap: git exits 128 for a bad option of its revision commands, the parser exits 129",
     ),
@@ -260,18 +248,6 @@ const DIVERGENT: &[(&str, &str)] = &[
     (
         "Dirty: stash clear extra",
         "gap: extra argument is 129 from the parser, git 1",
-    ),
-    (
-        "Dirty: tag -f",
-        "gap: bare `tag -f` lists the tags and exits 0, git is a usage error (129)",
-    ),
-    (
-        "Dirty: tag -l -d v1",
-        "gap: `-l` with `-d` lists the tags and exits 0, git is a usage error (129)",
-    ),
-    (
-        "Dirty: tag -m msg",
-        "gap: `-m` without a tag name lists the tags and exits 0, git is a usage error (129)",
     ),
     (
         "Clean: merge --ff-only --no-ff clean",
@@ -611,6 +587,12 @@ fn groups() -> Vec<(&'static str, Vec<Case>)> {
                 case(Dirty, "tag -l -d v1"),
                 case(Dirty, "tag a b c"),
                 case(Dirty, "tag -f"),
+                case(Dirty, "tag -a"),
+                case(Dirty, "tag -s"),
+                case(Dirty, "tag -d"),
+                case(Dirty, "tag -l -f"),
+                case(Dirty, "tag -d -f v1"),
+                case(Dirty, "tag -f newtag"),
                 case(Outside, "tag"),
             ],
         ),

@@ -6,10 +6,12 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use pyn_object::FileMode;
 use pyn_proto as api;
 
 use crate::backend::Backend;
 use crate::diffstat::{self, Counts};
+use crate::local_store::file_mode;
 use crate::localfile;
 use crate::time;
 use crate::workspace::{FileState, Workspace, hash_of};
@@ -39,7 +41,7 @@ pub enum Source {
 #[derive(Clone)]
 pub struct Blob {
     pub hash: String,
-    pub mode: api::FileMode,
+    pub mode: FileMode,
     pub source: Source,
 }
 
@@ -47,26 +49,21 @@ impl Blob {
     pub fn gitlink(hash: String, dirty: bool) -> Self {
         Self {
             hash,
-            // The server's mode has no gitlink; the source supplies mode 160000.
-            mode: api::FileMode::Regular,
+            mode: FileMode::Gitlink,
             source: Source::Gitlink { dirty },
         }
     }
 
     pub fn is_gitlink(&self) -> bool {
-        matches!(self.source, Source::Gitlink { .. })
+        self.mode == FileMode::Gitlink
     }
 
     fn is_regular(&self) -> bool {
-        !self.is_gitlink() && self.mode != api::FileMode::Symlink
+        matches!(self.mode, FileMode::Regular | FileMode::Executable)
     }
 
     fn mode(&self) -> &str {
-        if self.is_gitlink() {
-            "160000"
-        } else {
-            self.mode.as_str()
-        }
+        self.mode.as_str()
     }
 
     fn same_content(&self, other: &Self) -> bool {
@@ -105,7 +102,7 @@ pub fn tree_of_snapshot(entries: &[api::SnapshotEntry]) -> Tree {
         .map(|e| {
             let blob = Blob {
                 hash: e.content.clone(),
-                mode: e.file_mode,
+                mode: file_mode(e.file_mode),
                 source: if e.revision == 0 {
                     Source::Object {
                         id: e.content.clone(),
@@ -128,7 +125,7 @@ pub fn tree_of_state(state: &BTreeMap<String, FileState>) -> Tree {
         .map(|(p, k)| {
             let blob = Blob {
                 hash: k.hash.clone(),
-                mode: k.file_mode,
+                mode: file_mode(k.file_mode),
                 source: Source::Remote {
                     revision: k.revision,
                 },
@@ -147,7 +144,7 @@ pub fn tree_of_staged(ws: &Workspace, index: &crate::staging::Index) -> Tree {
         .map(|(p, e)| {
             let blob = Blob {
                 hash: e.hash.clone(),
-                mode: e.file_mode,
+                mode: file_mode(e.file_mode),
                 source: Source::Local {
                     file: crate::staging::content_path(ws, &e.hash),
                 },
@@ -170,7 +167,7 @@ pub fn tree_of_disk<'a>(ws: &Workspace, paths: impl Iterator<Item = &'a String>)
             path.clone(),
             Blob {
                 hash: hash_of(&bytes),
-                mode,
+                mode: file_mode(mode),
                 source: Source::Local { file },
             },
         );

@@ -916,6 +916,113 @@ fn commit_all_modified_gitlinks() {
     });
 }
 
+fn gitlink_stats(option: &str) {
+    for state in ["clean", "forward"] {
+        each(|f| {
+            f.state(state);
+            f.state("tracked");
+            f.state("untracked");
+            let want = run(&f.repo, &["diff", option, "--", "sub"]);
+            eprintln!("git diff {option}, {state}: {want:?}");
+            assert!(!want.is_empty());
+            f.same(&["diff", option, "--", "sub"]);
+        });
+    }
+}
+
+#[test]
+fn invalid_submodule_ignore_warns() {
+    each(|f| {
+        f.state("tracked");
+        for (default, local, modules) in [
+            (None, None, Some("bogus")),
+            (Some("all"), None, Some("bogus")),
+        ] {
+            f.configure(default, local, modules);
+            for args in [vec!["status", "-s", "--", "sub"], vec!["diff", "--", "sub"]] {
+                let want = git(&f.repo).args(&args).output().unwrap();
+                eprintln!(
+                    "git {args:?} ({default:?}, {local:?}, {modules:?}): status={}, stdout={:?}, stderr={:?}",
+                    want.status,
+                    String::from_utf8_lossy(&want.stdout),
+                    String::from_utf8_lossy(&want.stderr)
+                );
+                assert_eq!(want.status.code(), Some(0));
+                let got = f.pyn(&args);
+                assert_eq!(
+                    got.status.code(),
+                    want.status.code(),
+                    "{}",
+                    String::from_utf8_lossy(&got.stderr)
+                );
+                assert_eq!(got.stdout, want.stdout);
+                assert_eq!(got.stderr, want.stderr);
+            }
+        }
+    });
+}
+
+#[test]
+fn invalid_diff_ignore_is_fatal() {
+    each(|f| {
+        f.state("tracked");
+        for (default, local) in [
+            (Some("bogus"), None),
+            (None, Some("bogus")),
+            (Some("bogus"), Some("all")),
+        ] {
+            f.configure(default, local, None);
+            for args in [vec!["status", "-s"], vec!["diff"]] {
+                let want = git(&f.repo).args(&args).output().unwrap();
+                eprintln!(
+                    "git {args:?}: status={}, stderr={:?}",
+                    want.status,
+                    String::from_utf8_lossy(&want.stderr)
+                );
+                assert_eq!(want.status.code(), Some(128));
+                let got = f.pyn(&args);
+                assert_eq!(got.status.code(), want.status.code());
+                assert_eq!(got.stdout, want.stdout);
+                assert_eq!(got.stderr, want.stderr);
+            }
+        }
+    });
+}
+
+#[test]
+fn malformed_gitfile_reports_os_error_once() {
+    for format in FORMATS {
+        let f = Fixture::new(format, true);
+        fs::write(f.sub.join(".git"), "gitdir: /etc\n").unwrap();
+        for args in [vec!["status", "-s"], vec!["diff"]] {
+            let want = git(&f.repo).args(&args).output().unwrap();
+            eprintln!(
+                "git {args:?}: status={}, stderr={:?}",
+                want.status,
+                String::from_utf8_lossy(&want.stderr)
+            );
+            let got = f.pyn(&args);
+            assert_eq!(got.status.code(), want.status.code());
+            let stderr = String::from_utf8_lossy(&got.stderr);
+            assert_eq!(stderr.matches("(os error 2)").count(), 1, "{stderr}");
+        }
+    }
+}
+
+#[test]
+fn dirty_only_gitlink_stat() {
+    gitlink_stats("--stat");
+}
+
+#[test]
+fn dirty_only_gitlink_shortstat() {
+    gitlink_stats("--shortstat");
+}
+
+#[test]
+fn dirty_only_gitlink_numstat() {
+    gitlink_stats("--numstat");
+}
 
 fn submodule_config_reads(source: &str, args: &[&str]) {
     for format in FORMATS {
@@ -942,6 +1049,21 @@ fn submodule_config_reads(source: &str, args: &[&str]) {
         );
         run(&f.repo, &["add", ".gitmodules"]);
         run(&f.repo, &["commit", "-qm", "two submodules"]);
+        if args.contains(&"--cached") || args.contains(&"HEAD~1") {
+            for path in ["sub", "other"] {
+                run(
+                    &f.repo,
+                    &[
+                        "update-index",
+                        "--cacheinfo",
+                        &format!("160000,{},{}", f.second, path),
+                    ],
+                );
+            }
+            if args.contains(&"HEAD~1") {
+                run(&f.repo, &["commit", "-qm", "move both submodules"]);
+            }
+        }
         if source == "HEAD" {
             run(&f.repo, &["update-index", "--force-remove", ".gitmodules"]);
         }
@@ -1009,44 +1131,26 @@ fn status_reads_head_submodule_config_once() {
 
 #[test]
 fn diff_parses_submodule_config_once() {
-    submodule_config_reads("worktree", &["diff", "--", "sub", "other"]);
+    diff_submodule_config_reads("worktree");
 }
 
 #[test]
 fn diff_reads_index_submodule_config_once() {
-    submodule_config_reads("index", &["diff", "--", "sub", "other"]);
+    diff_submodule_config_reads("index");
 }
 
 #[test]
 fn diff_reads_head_submodule_config_once() {
-    submodule_config_reads("HEAD", &["diff", "--", "sub", "other"]);
+    diff_submodule_config_reads("HEAD");
 }
 
-fn gitlink_stats(option: &str) {
-    for state in ["clean", "forward"] {
-        each(|f| {
-            f.state(state);
-            f.state("tracked");
-            f.state("untracked");
-            let want = run(&f.repo, &["diff", option, "--", "sub"]);
-            eprintln!("git diff {option}, {state}: {want:?}");
-            assert!(!want.is_empty());
-            f.same(&["diff", option, "--", "sub"]);
-        });
+fn diff_submodule_config_reads(source: &str) {
+    for args in [
+        vec!["diff", "--cached", "--", "sub", "other"],
+        vec!["diff", "--", "sub", "other"],
+        vec!["diff", "HEAD", "--", "sub", "other"],
+        vec!["diff", "HEAD~1", "HEAD", "--", "sub", "other"],
+    ] {
+        submodule_config_reads(source, &args);
     }
-}
-
-#[test]
-fn dirty_only_gitlink_stat() {
-    gitlink_stats("--stat");
-}
-
-#[test]
-fn dirty_only_gitlink_shortstat() {
-    gitlink_stats("--shortstat");
-}
-
-#[test]
-fn dirty_only_gitlink_numstat() {
-    gitlink_stats("--numstat");
 }

@@ -162,9 +162,14 @@ impl Submodules<'_> {
                         }
                     }
                     "ignore" => {
-                        config
-                            .ignores
-                            .insert(name.clone(), e.value.clone().unwrap_or_default());
+                        let value = e.value.as_deref().unwrap_or("");
+                        if parse_ignore(value).is_ok() {
+                            config.ignores.insert(name.clone(), value.to_owned());
+                        } else {
+                            eprintln!(
+                                "warning: Invalid parameter '{value}' for config option 'submodule.{name}.ignore'"
+                            );
+                        }
                     }
                     _ => {}
                 }
@@ -186,23 +191,19 @@ impl Submodules<'_> {
 
     pub fn ignore(&self, path: &[u8], default: SubmoduleIgnore) -> Result<SubmoduleIgnore> {
         let config = self.config()?;
-        let value = config
+        let default = config
+            .default
+            .as_deref()
+            .map(parse_ignore)
+            .transpose()?
+            .unwrap_or(default);
+        config
             .paths
             .get(path)
             .and_then(|name| config.ignores.get(name))
-            .or(config.default.as_ref());
-        Ok(match value.map(String::as_str) {
-            None => default,
-            Some("none") => SubmoduleIgnore::None,
-            Some("untracked") => SubmoduleIgnore::Untracked,
-            Some("dirty") => SubmoduleIgnore::Dirty,
-            Some("all") => SubmoduleIgnore::All,
-            Some(v) => {
-                return Err(Error::Invalid(format!(
-                    "bad --ignore-submodules argument: {v}"
-                )));
-            }
-        })
+            .map(|value| parse_ignore(value))
+            .transpose()
+            .map(|value| value.unwrap_or(default))
     }
 
     /// Inspects a gitlink using this operation's settings.
@@ -241,5 +242,17 @@ impl Submodules<'_> {
             state.untracked &= ignore != SubmoduleIgnore::Untracked;
         }
         Ok(Some(state))
+    }
+}
+
+fn parse_ignore(value: &str) -> Result<SubmoduleIgnore> {
+    match value {
+        "none" => Ok(SubmoduleIgnore::None),
+        "untracked" => Ok(SubmoduleIgnore::Untracked),
+        "dirty" => Ok(SubmoduleIgnore::Dirty),
+        "all" => Ok(SubmoduleIgnore::All),
+        _ => Err(Error::Invalid(format!(
+            "bad --ignore-submodules argument: {value}"
+        ))),
     }
 }

@@ -12,7 +12,7 @@ use pyn_gitwork::{
 };
 use pyn_object::ObjectId;
 
-use super::{GitHome, file_mode, path_string, stage};
+use super::{GitHome, path_string, stage};
 use crate::backend::Backend;
 use crate::commit_format::{Context, Decorations, FormatArgs, Rendering, render};
 use crate::diff::{self, Blob, Source, Tree};
@@ -454,7 +454,7 @@ fn entry_blob(e: &Entry) -> Option<Blob> {
     }
     Some(Blob {
         hash: e.id.to_hex(),
-        mode: file_mode(e.mode)?,
+        mode: e.mode,
         source: Source::Object { id: e.id.to_hex() },
     })
 }
@@ -483,7 +483,7 @@ fn disk_blob(
         return Ok(None);
     }
     let (mode, id) = hash_worktree_file(git.repo.algorithm(), &file)?;
-    Ok(file_mode(mode).map(|mode| Blob {
+    Ok(Some(Blob {
         hash: id.to_hex(),
         mode,
         source: Source::Local { file },

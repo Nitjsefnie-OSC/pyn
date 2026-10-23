@@ -173,7 +173,7 @@ fn person(sig: &Signature) -> api::Person {
     }
 }
 
-/// Server-style file listings have no gitlink mode; git-home diffs handle gitlinks in `entry_blob`.
+/// The file mode for server-style listings, excluding trees and gitlinks.
 fn file_mode(mode: FileMode) -> Option<api::FileMode> {
     match mode {
         FileMode::Regular => Some(api::FileMode::Regular),

@@ -876,7 +876,18 @@ fn main() {
             eprintln!("{}", sanitize::text(&rejected.to_string()));
             std::process::exit(128);
         }
-        eprintln!("fatal: {}", sanitize::text(&format!("{e:#}")));
+        let mut message = String::new();
+        for cause in e.chain() {
+            let detail = cause.to_string();
+            // A cause's Display may already include the next source in the chain.
+            if !message.ends_with(&detail) {
+                if !message.is_empty() {
+                    message.push_str(": ");
+                }
+                message.push_str(&detail);
+            }
+        }
+        eprintln!("fatal: {}", sanitize::text(&message));
         std::process::exit(128);
     }
 }

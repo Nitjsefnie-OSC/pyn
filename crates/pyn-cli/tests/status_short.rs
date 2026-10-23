@@ -4,8 +4,11 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use common::{Env, REPO, start};
+use chrono::{Duration, Utc};
+use common::{Env, REPO, cell_rows, start, start_with_clock};
+use pyn_core::ManualClock;
 
 fn clone(env: &Env, extra: &[&str]) -> PathBuf {
     let ws = env.dir("ws");
@@ -88,6 +91,89 @@ fn each_state_has_its_letters() {
         assert_eq!(got, want, "{flags:?}: {out}");
         assert_eq!(untracked, "?? notes.txt", "untracked last: {out}");
     }
+}
+
+#[test]
+fn lock_state_stays_out_of_short_and_porcelain_output() {
+    let clock = Arc::new(ManualClock::new(Utc::now()));
+    let env = start_with_clock(clock.clone());
+    for path in [
+        "Content/expired.umap",
+        "Content/mine.umap",
+        "Content/theirs.umap",
+    ] {
+        env.seed("alice", path, "one\n", None);
+    }
+    let ws = clone(&env, &[]);
+    env.ok(&ws, "alice", &["lock", "Content/expired.umap"]);
+    clock.advance(Duration::hours(9));
+    env.ok(&ws, "alice", &["lock", "Content/mine.umap"]);
+    env.ok(&ws, "bob", &["lock", "Content/theirs.umap"]);
+
+    for flag in ["-s", "--porcelain"] {
+        assert_eq!(env.ok(&ws, "alice", &["status", flag]), "", "{flag}");
+    }
+    for path in [
+        "Content/expired.umap",
+        "Content/mine.umap",
+        "Content/theirs.umap",
+    ] {
+        write(&ws, path, "edited\n");
+    }
+    env.ok(&ws, "alice", &["add", "Content/mine.umap"]);
+    let expected = " M Content/expired.umap\nM  Content/mine.umap\n M Content/theirs.umap\n";
+    for flag in ["-s", "--porcelain"] {
+        assert_eq!(env.ok(&ws, "alice", &["status", flag]), expected, "{flag}");
+        assert_eq!(
+            env.ok(&ws, "alice", &["status", flag, "-b"]),
+            format!("## main...origin/main\n{expected}"),
+            "{flag} -b"
+        );
+    }
+
+    let out = env.ok(&ws, "alice", &["status"]);
+    let mut rows = cell_rows(&out);
+    // Lease countdowns use wall time rather than the server's manual clock.
+    for row in &mut rows {
+        if row.len() == 6 && row[0] == "exclusive" && row[4] != "-" {
+            row[4] = row[4].split_once(" · ").unwrap().0.to_string();
+        }
+    }
+    assert_eq!(
+        rows,
+        vec![
+            vec!["On branch main"],
+            vec!["MODE", "REV", "STAGED", "STATE", "LOCK", "PATH"],
+            vec![
+                "exclusive",
+                "r1",
+                "-",
+                "modified",
+                "-",
+                "Content/expired.umap"
+            ],
+            vec![
+                "exclusive",
+                "r1",
+                "modified",
+                "clean",
+                "you",
+                "Content/mine.umap"
+            ],
+            vec![
+                "exclusive",
+                "r1",
+                "-",
+                "modified",
+                "bob",
+                "Content/theirs.umap"
+            ],
+            vec![
+                "1 staged, 2 modified, 0 behind, 0 new, 0 untracked, 1 locked by you, 1 locked by others"
+            ],
+        ],
+        "{out}"
+    );
 }
 
 #[test]

@@ -12,7 +12,7 @@ pub struct StatusArgs {
     #[arg(long)]
     pub revision: Option<String>,
     /// Two-column `XY <path>` lines instead of the table.
-    /// Lock state is shown in the default table and by `pyn lock`/`pyn locks`, not in `-s`/`--porcelain` output.
+    /// On a pyn server, lock state is shown in the default table and by `pyn lock`/`pyn locks`, not in `-s`/`--porcelain` output.
     #[arg(short = 's', long)]
     pub short: bool,
     /// Like `--short`, with paths from the repository root and no branch line unless `-b` is given.

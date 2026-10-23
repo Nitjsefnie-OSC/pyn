@@ -65,7 +65,7 @@ The commands named in decision #218.
 | `pyn clone --revision <commit>` | | pyn only | Clone as of a commit (a hash, `HEAD~N`). Git does this with `clone` then `checkout`. |
 | `pyn clone --no-local-store` | | pyn only | A pyn server clone keeps a partial local store of the history under `.pyn/local_only/store/` and commits locally by default (`--local-store` says the same); this opts out and commits straight to the server. See [the local store](workspace.md#the-local-store). A usage error for a git URL. |
 | `pyn migrate` | | pyn only | Converts a workspace made before local commits; see [migrating](workspace.md#migrating-a-workspace). |
-| `git status` | `pyn status` | different | Header `On branch <name>`, then a table with mode, revision, staged, state, lock and path plus a summary line, because mode and lock state have no place in git's layout. `STAGED` is `added` or `modified` for a staged path, and `STATE` then describes what changed after it was staged. On a git home the table is `STAGED`, `UNSTAGED`, `PATH` with git's states. |
+| `git status` | `pyn status` | different | Header `On branch <name>`, then a table with mode, revision, staged, state, lock and path plus a summary line, because mode and lock state have no place in git's layout. `STAGED` is `added` or `modified` for a staged path, and `STATE` then describes what changed after it was staged. Lock state is shown in this default table's lock column and by `pyn lock`/`pyn locks`, not in `-s`/`--porcelain` output. On a git home the table is `STAGED`, `UNSTAGED`, `PATH` with git's states. |
 | `git status -s`, `--short`, `--porcelain[=v1]`, `-b`, `--branch`, `<pathspec>...` | same | same | Git's `XY <path>` lines; see [the short format](#the-short-status-format). Pathspecs are literal files and folders, taken relative to where you stand, and limit every format. `-z`, `--porcelain=v2`, `--ignored`, `-u<mode>`, `--ahead-behind` and glob or magic pathspecs are a usage error (`129`). `pyn status --revision` fails on a git home. |
 | `pyn status --revision <commit>` | | pyn only | Compare the workspace with a past commit (`behind` / `ahead`). |
 | `git add <path>...` | `pyn add <path>...` | same | Stages a path, a folder or `.`; a path is required unless `-u` or `-A` is given. On an exclusive path of a pyn server it fails unless you hold the lock (see below). |
@@ -824,7 +824,8 @@ On a pyn server `STAGED` becomes `X` (`added` is `A`, `modified` `M`, `deleted` 
 (`modified` is `M`, `deleted locally` `D`, `untracked` is `??`). A conflicted path is `UU`, or `AA` when both sides added it
 (the server does not say which side deleted a path, so `DU` and `UD` are not used). States that are about the server and
 not the work tree (`behind`, `new`, locks, local commits not yet published, modes) have no place in the short format and
-print nothing. `-b` prints `## <branch>...origin/<branch>` with `[ahead N]` for local commits not yet published, and just
+print nothing. Lock state is shown in the default table's lock column and by `pyn lock`/`pyn locks`.
+`-b` prints `## <branch>...origin/<branch>` with `[ahead N]` for local commits not yet published, and just
 `## <branch>` for a workspace without a local store. Pathspecs follow the same rules as `add`.
 
 ### Staging and committing

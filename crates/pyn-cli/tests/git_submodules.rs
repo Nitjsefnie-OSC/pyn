@@ -663,6 +663,9 @@ fn nested_untracked_default_diff() {
             fs::write(nested.join("new"), "untracked\n").unwrap();
             f.same(&["diff"]);
             f.same(&["diff", "HEAD"]);
+            fs::write(nested.join("file"), "tracked\n").unwrap();
+            f.same(&["diff"]);
+            f.same(&["diff", "HEAD"]);
         }
     }
 }
@@ -737,6 +740,59 @@ fn merge_stat_preserves_gitlink_kind() {
                 String::from_utf8_lossy(&got.stderr)
             );
             assert_eq!(String::from_utf8_lossy(&got.stdout), want, "{replacement}");
+        });
+    }
+}
+
+#[test]
+fn missing_gitmodules_source_fallback() {
+    for source in ["index", "HEAD"] {
+        each(|f| {
+            f.configure(None, None, Some("all"));
+            run(&f.repo, &["add", ".gitmodules"]);
+            if source == "HEAD" {
+                run(&f.repo, &["commit", "-qm", "record module settings"]);
+                run(&f.repo, &["update-index", "--force-remove", ".gitmodules"]);
+            }
+            f.state("tracked");
+            for local in [None, Some("none"), Some("all")] {
+                f.configure(None, local, None);
+                fs::remove_file(f.repo.join(".gitmodules")).unwrap();
+                f.same(&["status", "-s", "--", "sub"]);
+                f.same(&["status", "--porcelain", "--", "sub"]);
+                f.table();
+                f.same(&["diff", "--", "sub"]);
+                f.same(&["diff", "HEAD", "--", "sub"]);
+            }
+        });
+    }
+}
+
+#[test]
+fn unborn_submodule_content() {
+    for state in ["staged", "untracked", "empty"] {
+        each(|f| {
+            run(&f.sub, &["symbolic-ref", "HEAD", "refs/heads/unborn"]);
+            if state != "staged" {
+                run(&f.sub, &["read-tree", "--empty"]);
+            }
+            if state == "empty" {
+                fs::remove_file(f.sub.join("file")).unwrap();
+            }
+            for ignore in [
+                None,
+                Some("none"),
+                Some("untracked"),
+                Some("dirty"),
+                Some("all"),
+            ] {
+                f.configure(None, ignore, None);
+                f.same(&["status", "-s", "--", "sub"]);
+                f.same(&["status", "--porcelain", "--", "sub"]);
+                f.table();
+                f.same(&["diff", "--", "sub"]);
+                f.same(&["diff", "HEAD", "--", "sub"]);
+            }
         });
     }
 }

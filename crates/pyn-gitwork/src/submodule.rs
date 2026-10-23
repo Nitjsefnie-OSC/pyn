@@ -17,6 +17,7 @@ pub enum SubmoduleIgnore {
 /// The visible changes within an initialized submodule, after ignore settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubmoduleStatus {
+    /// HEAD, or the recorded gitlink ID when HEAD is unborn.
     pub head: ObjectId,
     pub new_commits: bool,
     pub modified: bool,
@@ -30,19 +31,41 @@ impl SubmoduleStatus {
 }
 
 impl Repo {
+    fn gitmodules(&self) -> Result<Config> {
+        let file = self.root()?.join(".gitmodules");
+        match std::fs::symlink_metadata(&file) {
+            Ok(m) if m.is_file() => return Ok(Config::read(&file)?),
+            Ok(_) => return Ok(Config::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_at(&file)(e)),
+        }
+        let index = self.read_index()?;
+        let id = match index
+            .entries
+            .iter()
+            .find(|e| e.stage == 0 && e.path.as_slice() == b".gitmodules")
+        {
+            Some(e) => Some(e.id),
+            None => match self.head_commit()? {
+                Some(head) => self
+                    .entry_at(&self.commit(&head)?.tree, b".gitmodules")?
+                    .map(|e| e.id),
+                None => None,
+            },
+        };
+        Ok(match id {
+            Some(id) => Config::parse(&self.blob(&id)?)?,
+            None => Config::default(),
+        })
+    }
+
     /// Per-name config overrides `.gitmodules`, then `diff.ignoreSubmodules`, then the command's default.
     pub fn submodule_ignore(
         &self,
         path: &[u8],
         default: SubmoduleIgnore,
     ) -> Result<SubmoduleIgnore> {
-        let file = self.root()?.join(".gitmodules");
-        let modules = match std::fs::symlink_metadata(&file) {
-            Ok(m) if m.is_file() => Config::read(&file)?,
-            Ok(_) => Config::default(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
-            Err(e) => return Err(io_at(&file)(e)),
-        };
+        let modules = self.gitmodules()?;
         let name = modules.entries().iter().rev().find_map(|e| {
             (e.section == "submodule"
                 && e.key == "path"
@@ -85,9 +108,7 @@ impl Repo {
             return Ok(None);
         }
         let sub = self.open_submodule(&root)?;
-        let Some(head) = sub.head_commit()? else {
-            return Ok(None);
-        };
+        let head = sub.head_commit()?.unwrap_or(recorded);
         let mut state = SubmoduleStatus {
             head,
             new_commits: head != recorded,

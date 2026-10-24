@@ -238,6 +238,10 @@ impl GitHome {
 }
 
 impl Backend for GitHome {
+    fn quote_diff_path(&self, path: &[u8]) -> String {
+        crate::short_status::quote_diff(path, self.repo.bool_setting("core.quotePath", true))
+    }
+
     fn whoami(&self) -> Result<String> {
         self.repo
             .config()

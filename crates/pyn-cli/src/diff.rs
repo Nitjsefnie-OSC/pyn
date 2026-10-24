@@ -628,6 +628,7 @@ pub fn compare(
     }
     if format.kind == Kind::NumStat {
         for (path, counts) in &stat_rows {
+            let path = backend.quote_diff_path(path.as_bytes());
             match counts {
                 Counts::Lines(a, d) => {
                     let _ = writeln!(out, "{a}\t{d}\t{path}");

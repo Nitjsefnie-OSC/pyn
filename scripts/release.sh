@@ -42,6 +42,11 @@ if ! git check-ref-format --allow-onelevel "$tag"; then
   exit 1
 fi
 
+if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+  echo "tag '$tag' already exists" >&2
+  exit 1
+fi
+
 # The members pin their intra-workspace dependencies at the workspace version,
 # so the bump moves every intra-workspace requirement with the root version.
 sed -i "s/^version = \"$current\"/version = \"$version\"/" Cargo.toml

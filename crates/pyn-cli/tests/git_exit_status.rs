@@ -792,6 +792,31 @@ fn groups() -> Vec<(&'static str, Vec<Case>)> {
             ],
         ),
         (
+            "patch-exchange",
+            vec![
+                case(Clean, "format-patch nosuchrev"),
+                case(Clean, "format-patch --stdout -o out -1"),
+                case(Clean, "format-patch --stdout -1"),
+                case(Clean, "format-patch --stdout HEAD"),
+                case(Clean, "format-patch --stdout nosuch..HEAD"),
+                case(Outside, "format-patch --stdout -1"),
+                case(Clean, "apply"),
+                case(Clean, "apply nosuch.patch"),
+                case(Clean, "apply --check"),
+                case(Clean, "apply --allow-empty"),
+                case(Clean, "apply --index --cached"),
+                case(Outside, "apply nosuch.patch"),
+                case(Clean, "am"),
+                case(Clean, "am nosuch.mbox"),
+                case(Clean, "am --continue"),
+                case(Clean, "am --skip"),
+                case(Clean, "am --abort"),
+                case(Clean, "am --quit"),
+                case(Clean, "am --show-current-patch"),
+                case(Outside, "am --continue"),
+            ],
+        ),
+        (
             "bisect",
             vec![
                 case(Clean, "bisect good"),
@@ -904,7 +929,8 @@ group_tests!(
     config,
     grep,
     blame,
-    bisect
+    bisect,
+    patch_exchange
 );
 
 #[test]

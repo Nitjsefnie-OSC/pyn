@@ -274,7 +274,7 @@ struct Plan {
 
 fn plan(git: &GitHome, index: &Index, specs: &Specs, update: bool, force: bool) -> Result<Plan> {
     let mut ops = BTreeMap::new();
-    for (path, kind) in git.repo.unstaged_changes(index)? {
+    for (path, kind) in git.repo.unstaged_changes_for_staging(index)? {
         if !specs.spec.matches(&path) {
             continue;
         }
@@ -390,7 +390,6 @@ pub(super) fn stage_file(
             .context("submodule does not have a commit checked out")?;
         let mut entry = IndexEntry::new(path, GITLINK, id);
         stat_fields(&mut entry, &meta);
-        entry.size = 0;
         return Ok(entry);
     }
     let mut mode = worktree_mode(&meta).with_context(|| {
@@ -489,7 +488,12 @@ fn apply(
                     println!("add '{name}'");
                 }
                 if !dry_run {
-                    let entry = stage_file(git, path, entries.get(&(path.clone(), 0)))?;
+                    let existing = entries.get(&(path.clone(), 0)).or_else(|| {
+                        (1..=3)
+                            .filter_map(|stage| entries.get(&(path.clone(), stage)))
+                            .find(|entry| entry.mode == GITLINK)
+                    });
+                    let entry = stage_file(git, path, existing)?;
                     put_entry(entries, entry);
                 }
             }

@@ -857,67 +857,102 @@ fn unmerged_gitmodules_does_not_use_head() {
 
 #[test]
 fn add_modified_gitlinks() {
-    for args in [
-        vec!["add", "."],
-        vec!["add", "-A"],
-        vec!["add", "sub"],
-        vec!["add", "-u"],
-        vec!["add", "-f", "."],
-    ] {
-        each(|f| {
-            f.state("backward");
-            fs::write(f.repo.join("newf"), "new\n").unwrap();
-            let oracle = f.repo.parent().unwrap().join("oracle");
-            gitfix::copy_tree(&f.repo, &oracle);
-            run(&oracle, &args);
-            let want = run(&oracle, &["diff", "--cached", "--name-status"]);
-            eprintln!("git {args:?}: {want:?}");
-            assert!(want.contains("M\tsub\n"), "{want}");
-            let got = f.pyn(&args);
-            assert_eq!(
-                got.status.code(),
-                Some(0),
-                "{args:?}: {}",
-                String::from_utf8_lossy(&got.stderr)
-            );
-            assert_eq!(run(&f.repo, &["diff", "--cached", "--name-status"]), want);
-            assert_eq!(run(&f.repo, &["write-tree"]), run(&oracle, &["write-tree"]));
-        });
+    for ignore in [None, Some("all")] {
+        for args in [
+            vec!["add", "."],
+            vec!["add", "-A"],
+            vec!["add", "sub"],
+            vec!["add", "-u"],
+            vec!["add", "-f", "."],
+        ] {
+            each(|f| {
+                f.state("backward");
+                f.configure(None, ignore, None);
+                fs::write(f.repo.join("newf"), "new\n").unwrap();
+                let oracle = f.repo.parent().unwrap().join("oracle");
+                gitfix::copy_tree(&f.repo, &oracle);
+                run(&oracle, &args);
+                let want = run(
+                    &oracle,
+                    &[
+                        "-c",
+                        "submodule.library.ignore=none",
+                        "diff",
+                        "--cached",
+                        "--name-status",
+                    ],
+                );
+                eprintln!("git {args:?}: {want:?}");
+                assert!(want.contains("M\tsub\n"), "{want}");
+                let got = f.pyn(&args);
+                assert_eq!(
+                    got.status.code(),
+                    Some(0),
+                    "{args:?}: {}",
+                    String::from_utf8_lossy(&got.stderr)
+                );
+                assert_eq!(
+                    run(
+                        &f.repo,
+                        &[
+                            "-c",
+                            "submodule.library.ignore=none",
+                            "diff",
+                            "--cached",
+                            "--name-status"
+                        ]
+                    ),
+                    want
+                );
+                assert_eq!(run(&f.repo, &["write-tree"]), run(&oracle, &["write-tree"]));
+            });
+        }
     }
 }
 
 #[test]
 fn commit_all_modified_gitlinks() {
-    each(|f| {
-        f.state("backward");
-        fs::write(f.repo.join("newf"), "new\n").unwrap();
-        run(&f.repo, &["add", "newf"]);
-        run(&f.repo, &["config", "user.name", "t"]);
-        run(&f.repo, &["config", "user.email", "t@example.com"]);
-        let oracle = f.repo.parent().unwrap().join("oracle");
-        gitfix::copy_tree(&f.repo, &oracle);
-        run(&oracle, &["commit", "-qam", "stage tracked"]);
-        let want = run(
-            &oracle,
-            &["diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"],
-        );
-        eprintln!("git commit -a: {want:?}");
-        assert!(
-            want.contains("M\tsub\n") && want.contains("A\tnewf\n"),
-            "{want}"
-        );
-        let got = f.pyn(&["commit", "-qam", "stage tracked"]);
-        assert_eq!(
-            got.status.code(),
-            Some(0),
-            "{}",
-            String::from_utf8_lossy(&got.stderr)
-        );
-        assert_eq!(
-            run(&f.repo, &["rev-parse", "HEAD^{tree}"]),
-            run(&oracle, &["rev-parse", "HEAD^{tree}"])
-        );
-    });
+    for ignore in [None, Some("all")] {
+        each(|f| {
+            f.state("backward");
+            f.configure(None, ignore, None);
+            fs::write(f.repo.join("newf"), "new\n").unwrap();
+            run(&f.repo, &["add", "newf"]);
+            run(&f.repo, &["config", "user.name", "t"]);
+            run(&f.repo, &["config", "user.email", "t@example.com"]);
+            let oracle = f.repo.parent().unwrap().join("oracle");
+            gitfix::copy_tree(&f.repo, &oracle);
+            run(&oracle, &["commit", "-qam", "stage tracked"]);
+            let want = run(
+                &oracle,
+                &[
+                    "-c",
+                    "submodule.library.ignore=none",
+                    "diff-tree",
+                    "--no-commit-id",
+                    "--name-status",
+                    "-r",
+                    "HEAD",
+                ],
+            );
+            eprintln!("git commit -a: {want:?}");
+            assert!(
+                want.contains("M\tsub\n") && want.contains("A\tnewf\n"),
+                "{want}"
+            );
+            let got = f.pyn(&["commit", "-qam", "stage tracked"]);
+            assert_eq!(
+                got.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&got.stderr)
+            );
+            assert_eq!(
+                run(&f.repo, &["rev-parse", "HEAD^{tree}"]),
+                run(&oracle, &["rev-parse", "HEAD^{tree}"])
+            );
+        });
+    }
 }
 
 fn gitlink_stats(option: &str) {
@@ -1231,4 +1266,103 @@ fn numstat_quotes_text_paths() {
 #[test]
 fn numstat_quotes_binary_paths() {
     numstat_paths(true);
+}
+
+#[test]
+fn add_resolves_unmerged_gitlink() {
+    use std::io::Write;
+    use std::process::Stdio;
+    each(|f| {
+        let first = run(&f.sub, &["rev-parse", "HEAD"]);
+        f.state("forward");
+        run(&f.repo, &["update-index", "--force-remove", "sub"]);
+        let entries = format!(
+            "160000 {} 1\tsub\n160000 {} 2\tsub\n160000 {} 3\tsub\n",
+            first.trim(),
+            first.trim(),
+            f.second
+        );
+        let mut child = git(&f.repo)
+            .args(["update-index", "--index-info"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(entries.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        let oracle = f.repo.parent().unwrap().join("oracle");
+        gitfix::copy_tree(&f.repo, &oracle);
+        run(&oracle, &["add", "sub"]);
+        let want = run(&oracle, &["ls-files", "--stage", "--", "sub"]);
+        eprintln!("git resolved index: {want:?}");
+        assert_eq!(want.lines().count(), 1);
+        assert!(want.contains(" 0\tsub\n"));
+        let got = f.pyn(&["add", "sub"]);
+        assert_eq!(
+            got.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&got.stderr)
+        );
+        assert_eq!(run(&f.repo, &["ls-files", "--stage", "--", "sub"]), want);
+        assert_eq!(run(&f.repo, &["write-tree"]), run(&oracle, &["write-tree"]));
+    });
+}
+
+#[test]
+fn staged_gitlink_retains_directory_size() {
+    each(|f| {
+        f.state("forward");
+        let oracle = f.repo.parent().unwrap().join("oracle");
+        gitfix::copy_tree(&f.repo, &oracle);
+        run(&oracle, &["add", "sub"]);
+        let want = pyn_git::Repository::open(&oracle)
+            .unwrap()
+            .read_index()
+            .unwrap()
+            .unwrap();
+        let want = want.entries.iter().find(|e| e.path == b"sub").unwrap();
+        assert_eq!(
+            u64::from(want.size),
+            fs::metadata(oracle.join("sub")).unwrap().len()
+        );
+        let got = f.pyn(&["add", "sub"]);
+        assert_eq!(got.status.code(), Some(0));
+        let got = pyn_git::Repository::open(&f.repo)
+            .unwrap()
+            .read_index()
+            .unwrap()
+            .unwrap();
+        let got = got.entries.iter().find(|e| e.path == b"sub").unwrap();
+        assert_eq!(u64::from(got.size), fs::metadata(&f.sub).unwrap().len());
+        assert_eq!(run(&f.repo, &["write-tree"]), run(&oracle, &["write-tree"]));
+    });
+}
+
+#[test]
+fn staging_gitlinks_respects_index_bits() {
+    for flag in ["--assume-unchanged", "--skip-worktree"] {
+        each(|f| {
+            f.state("backward");
+            f.configure(None, Some("all"), None);
+            run(&f.repo, &["update-index", flag, "sub"]);
+            let before = run(&f.repo, &["write-tree"]);
+            let oracle = f.repo.parent().unwrap().join("oracle");
+            gitfix::copy_tree(&f.repo, &oracle);
+            run(&oracle, &["add", "-u"]);
+            assert_eq!(run(&oracle, &["write-tree"]), before);
+            let got = f.pyn(&["add", "-u"]);
+            assert_eq!(
+                got.status.code(),
+                Some(0),
+                "{flag}: {}",
+                String::from_utf8_lossy(&got.stderr)
+            );
+            assert_eq!(run(&f.repo, &["write-tree"]), run(&oracle, &["write-tree"]));
+        });
+    }
 }

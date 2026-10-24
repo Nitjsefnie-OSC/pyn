@@ -284,6 +284,19 @@ impl Repo {
         index: &Index,
         modules: &Submodules<'_>,
     ) -> Result<BTreeMap<Vec<u8>, Kind>> {
+        self.worktree_changes(index, Some(modules))
+    }
+
+    /// Changes to stage, retaining index policy without submodule display ignores.
+    pub fn unstaged_changes_for_staging(&self, index: &Index) -> Result<BTreeMap<Vec<u8>, Kind>> {
+        self.worktree_changes(index, None)
+    }
+
+    fn worktree_changes(
+        &self,
+        index: &Index,
+        modules: Option<&Submodules<'_>>,
+    ) -> Result<BTreeMap<Vec<u8>, Kind>> {
         let root = self.root()?;
         let file_mode = self.bool_setting("core.filemode", true);
         let index_time = std::fs::metadata(self.git().index_path())
@@ -308,12 +321,13 @@ impl Repo {
         e: &IndexEntry,
         file_mode: bool,
         index_time: Option<u64>,
-        modules: &Submodules<'_>,
+        modules: Option<&Submodules<'_>>,
     ) -> Result<Option<Kind>> {
         if e.assume_valid || e.skip_worktree {
             return Ok(None);
         }
         if e.mode == GITLINK
+            && let Some(modules) = modules
             && modules.ignore(&e.path, SubmoduleIgnore::None)? == SubmoduleIgnore::All
         {
             return Ok(None);
@@ -326,10 +340,19 @@ impl Repo {
         };
         if e.mode == GITLINK {
             return Ok(if meta.is_dir() {
-                modules
-                    .status(&e.path, e.id, SubmoduleIgnore::None)?
-                    .filter(SubmoduleStatus::changed)
-                    .map(|_| Kind::Modified)
+                if let Some(modules) = modules {
+                    modules
+                        .status(&e.path, e.id, SubmoduleIgnore::None)?
+                        .filter(SubmoduleStatus::changed)
+                        .map(|_| Kind::Modified)
+                } else if path.join(".git").exists() {
+                    self.open_submodule(&path)?
+                        .head_commit()?
+                        .filter(|head| *head != e.id)
+                        .map(|_| Kind::Modified)
+                } else {
+                    None
+                }
             } else {
                 Some(Kind::TypeChange)
             });

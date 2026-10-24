@@ -152,6 +152,8 @@ enum Command {
     Clean(git_home::CleanArgs),
     /// Search the work tree, the index (--cached) or revisions for a pattern, as `git grep` (a git repository only).
     Grep(git_home::GrepArgs),
+    /// Find the commit that introduced a change by binary search, as `git bisect` (a git repository only).
+    Bisect(git_home::BisectArgs),
     /// Show what commit last changed each line of a file, as `git blame` (a git repository only).
     Blame(git_home::BlameArgs),
     /// Like `blame`, in `git annotate`'s layout (a git repository only).
@@ -1802,7 +1804,8 @@ fn run(cli: Cli) -> Result<()> {
         | Command::ShowRef(_)
         | Command::Shortlog(_)
         | Command::Describe(_)
-        | Command::NameRev(_) => {
+        | Command::NameRev(_)
+        | Command::Bisect(_) => {
             eprintln!("fatal: not a git repository (or any of the parent directories): .git");
             std::process::exit(128);
         }

@@ -118,6 +118,7 @@ pub fn run(command: Command, git: &GitHome, cwd: &Path) -> Result<()> {
             }
             Ok(())
         }
+        Command::Bisect(args) => super::bisect::bisect(git, cwd, args),
         Command::Blame(args) => super::blame::blame(git, cwd, args, false),
         Command::Annotate(args) => super::blame::blame(git, cwd, args, true),
         Command::Reflog(args) => super::reflog::reflog(git, args),

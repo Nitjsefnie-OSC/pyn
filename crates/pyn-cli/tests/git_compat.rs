@@ -108,6 +108,10 @@ fn git_only_commands_say_so_and_unknown_ones_are_not_commands() {
     assert_eq!(code, Some(1));
     assert!(err.contains("'grep' searches a git repository"), "{err}");
 
+    let (code, err) = run(&["bisect", "good"]);
+    assert_eq!(code, Some(128));
+    assert!(err.contains("not a git repository"), "{err}");
+
     for name in ["blame", "annotate"] {
         let (code, err) = run(&[name, "x"]);
         assert_eq!(code, Some(1));

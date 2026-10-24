@@ -20,6 +20,8 @@ mod grep_regex;
 mod hunk_pick;
 mod init_git;
 mod log;
+mod log_gate;
+mod log_graph;
 mod log_match;
 mod ls_files;
 mod ls_tree;

@@ -1,0 +1,72 @@
+name: pyn fork probe — abbreviation oracle suites vs git 2.43
+
+# Fork-only probe (osc-adv-*), never sent upstream. CI's ubuntu-24.04 runner
+# image ships git 2.55; the maintainer compares against git 2.43, so this job
+# pins the archive's 2.43.0 inside an ubuntu:24.04 container and runs the
+# abbreviation oracle suite against it.
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: Git branch, tag, or 40-character commit SHA to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pyn-osc-git243-abbrev-${{ github.repository }}-${{ inputs.target_ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  git243-abbrev:
+    name: abbreviation oracles vs git 2.43
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: ubuntu:24.04
+    steps:
+      - name: Install git 2.43 from the noble archive
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git build-essential curl ca-certificates pkg-config libssl-dev zstd tar
+          git --version
+          [ "$(git --version)" = "git version 2.43.0" ] || {
+            echo "::error::noble archive no longer ships git 2.43.0: $(git --version)"
+            exit 1
+          }
+
+      - name: Checkout candidate ref
+        uses: actions/checkout@v7
+        with:
+          repository: Nitjsefnie-OSC/pyn
+          ref: ${{ inputs.target_ref }}
+          persist-credentials: false
+
+      - name: Report checked-out SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ ! "$checked_out_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::git rev-parse HEAD did not produce a 40-character commit SHA: $checked_out_sha"
+            exit 1
+          fi
+          printf 'checked-out SHA: %s\n' "$checked_out_sha"
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Abbreviation oracle suite vs git 2.43
+        run: |
+          cargo test -p pyn-cli --test git_abbrev

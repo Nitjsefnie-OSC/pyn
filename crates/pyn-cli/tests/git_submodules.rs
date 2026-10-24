@@ -173,17 +173,21 @@ impl Fixture {
         }
     }
 
-    fn pyn(&self, args: &[&str]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_pyn"))
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pyn"));
+        command
             .current_dir(&self.repo)
             .args(args)
             .env_clear()
             .env("PATH", path_env())
             .env("HOME", self.repo.parent().unwrap().join("home"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("TZ", "UTC")
-            .output()
-            .unwrap()
+            .env("TZ", "UTC");
+        command
+    }
+
+    fn pyn(&self, args: &[&str]) -> std::process::Output {
+        self.command(args).output().unwrap()
     }
 
     fn same(&self, args: &[&str]) {
@@ -1421,59 +1425,6 @@ fn normal_fixture(f: &Fixture) {
     commit(&f.repo, "normal", b"base\n", "normal");
 }
 
-fn duplicate_global_config(args: &[&str]) {
-    each(|f| {
-        normal_fixture(f);
-        fs::write(f.repo.join("normal"), "changed\n").unwrap();
-        run(&f.repo, &["add", "normal"]);
-        for (values, code) in [
-            (vec!["none", "all"], 0),
-            (vec!["bogus", "none"], 128),
-            (vec!["none", "bogus"], 128),
-            (vec!["bogus-first", "bogus-last", "none"], 128),
-        ] {
-            f.configure(None, None, None);
-            for value in &values {
-                run(
-                    &f.repo,
-                    &["config", "--add", "diff.ignoreSubmodules", value],
-                );
-            }
-            let want = git(&f.repo).args(args).output().unwrap();
-            eprintln!(
-                "git {args:?}, {values:?}: exit={:?}, stderr={:?}",
-                want.status.code(),
-                String::from_utf8_lossy(&want.stderr)
-            );
-            assert_eq!(want.status.code(), Some(code));
-            if code == 0 {
-                assert!(!want.stdout.is_empty());
-            }
-            let got = f.pyn(args);
-            assert_eq!(got.status.code(), want.status.code());
-            assert_eq!(got.stdout, want.stdout);
-            assert_eq!(got.stderr, want.stderr);
-        }
-    });
-}
-
-#[test]
-fn status_validates_all_global_values() {
-    duplicate_global_config(&["status", "-s"]);
-}
-
-#[test]
-fn diff_validates_all_global_values() {
-    duplicate_global_config(&["diff", "--cached", "--", "normal"]);
-}
-
-fn validation_line(f: &Fixture) -> String {
-    format!(
-        "submodule config validation: {}",
-        f.repo.join(".git").display()
-    )
-}
-
 fn normal_stash(f: &Fixture) {
     let original = fs::read(f.repo.join("normal")).unwrap();
     let head = run(&f.repo, &["rev-parse", "HEAD"]);
@@ -1644,5 +1595,182 @@ fn recursive_status_validates_child_config() {
                 assert_eq!(got.stderr, want.stderr);
             }
         });
+    }
+}
+
+fn duplicate_global_config(args: &[&str]) {
+    each(|f| {
+        normal_fixture(f);
+        fs::write(f.repo.join("normal"), "changed\n").unwrap();
+        run(&f.repo, &["add", "normal"]);
+        for (values, code) in [
+            (vec!["none", "all"], 0),
+            (vec!["bogus", "none"], 128),
+            (vec!["none", "bogus"], 128),
+            (vec!["bogus-first", "bogus-last", "none"], 128),
+        ] {
+            f.configure(None, None, None);
+            for value in &values {
+                run(
+                    &f.repo,
+                    &["config", "--add", "diff.ignoreSubmodules", value],
+                );
+            }
+            let want = git(&f.repo).args(args).output().unwrap();
+            eprintln!(
+                "git {args:?}, {values:?}: exit={:?}, stderr={:?}",
+                want.status.code(),
+                String::from_utf8_lossy(&want.stderr)
+            );
+            assert_eq!(want.status.code(), Some(code));
+            if code == 0 {
+                assert!(!want.stdout.is_empty());
+            }
+            let got = f.pyn(args);
+            assert_eq!(got.status.code(), want.status.code());
+            assert_eq!(got.stdout, want.stdout);
+            assert_eq!(got.stderr, want.stderr);
+        }
+    });
+}
+
+#[test]
+fn status_validates_all_global_values() {
+    duplicate_global_config(&["status", "-s"]);
+}
+
+#[test]
+fn diff_validates_all_global_values() {
+    duplicate_global_config(&["diff", "--cached", "--", "normal"]);
+}
+
+fn validation_line(f: &Fixture) -> String {
+    format!(
+        "submodule config validation: {}",
+        f.repo.join(".git").display()
+    )
+}
+
+fn observer_config_boundary(args: &[&str]) {
+    each(|f| {
+        normal_fixture(f);
+        commit(&f.repo, "normal", b"changed\n", "changed normal");
+        commit(&f.repo, "normal", b"changed again\n", "changed again");
+        normal_stash(f);
+        let mut counts = Vec::new();
+        for default in [None, Some("bogus")] {
+            f.configure(default, None, None);
+            let before = gitfix::snapshot(&f.repo);
+            let want = git(&f.repo).args(args).env("TZ", "UTC").output().unwrap();
+            eprintln!(
+                "git {args:?}, {default:?}: exit={:?}, stderr={:?}",
+                want.status.code(),
+                String::from_utf8_lossy(&want.stderr)
+            );
+            assert_eq!(
+                want.status.code(),
+                Some(if default.is_some() { 128 } else { 0 })
+            );
+            if default.is_none() {
+                assert!(!want.stdout.is_empty());
+            }
+            let got = f
+                .command(args)
+                .env("PYN_DEBUG_SUBMODULE_CONFIG", "1")
+                .output()
+                .unwrap();
+            assert_eq!(got.status.code(), want.status.code());
+            assert_eq!(got.stdout, want.stdout);
+            let stderr = String::from_utf8_lossy(&got.stderr);
+            counts.push(
+                stderr
+                    .lines()
+                    .filter(|line| *line == validation_line(f))
+                    .count(),
+            );
+            let diagnostics: String = stderr
+                .split_inclusive('\n')
+                .filter(|line| !line.starts_with("submodule config validation: "))
+                .collect();
+            assert_eq!(diagnostics.as_bytes(), want.stderr);
+            assert_eq!(gitfix::snapshot(&f.repo), before);
+        }
+        assert_eq!(counts, [1, 1], "{args:?}");
+    });
+}
+
+#[test]
+fn show_global_config_boundary() {
+    observer_config_boundary(&["show", "--stat"]);
+    observer_config_boundary(&["show", "-s"]);
+}
+
+#[test]
+fn stash_show_global_config_boundary() {
+    observer_config_boundary(&["stash", "show", "--numstat"]);
+}
+
+#[test]
+fn log_global_config_boundary() {
+    observer_config_boundary(&["log", "-n", "2", "--stat"]);
+    observer_config_boundary(&["log", "-n", "1"]);
+}
+
+#[test]
+fn merge_global_config_boundary() {
+    for stat in ["--stat", "--no-stat"] {
+        for default in [Some("bogus"), None] {
+            each(|f| {
+                normal_fixture(f);
+                commit(&f.repo, "normal", b"changed\n", "changed normal");
+                run(&f.repo, &["branch", "side"]);
+                run(&f.repo, &["reset", "--hard", "HEAD~1"]);
+                f.configure(default, None, None);
+                let oracle = f.repo.parent().unwrap().join("oracle");
+                gitfix::copy_tree(&f.repo, &oracle);
+                let want = git(&oracle).args(["merge", stat, "side"]).output().unwrap();
+                eprintln!(
+                    "git merge {stat}, {default:?}: exit={:?}, stderr={:?}",
+                    want.status.code(),
+                    String::from_utf8_lossy(&want.stderr)
+                );
+                assert_eq!(
+                    want.status.code(),
+                    Some(if default.is_some() { 128 } else { 0 })
+                );
+                if default.is_none() {
+                    assert!(!want.stdout.is_empty());
+                }
+                let got = f
+                    .command(&["merge", stat, "side"])
+                    .env("PYN_DEBUG_SUBMODULE_CONFIG", "1")
+                    .output()
+                    .unwrap();
+                assert_eq!(got.status.code(), want.status.code());
+                assert_eq!(got.stdout, want.stdout);
+                let stderr = String::from_utf8_lossy(&got.stderr);
+                let diagnostics: String = stderr
+                    .split_inclusive('\n')
+                    .filter(|line| !line.starts_with("submodule config validation: "))
+                    .collect();
+                assert_eq!(diagnostics.as_bytes(), want.stderr);
+                assert_eq!(
+                    fs::read(f.repo.join("normal")).unwrap(),
+                    fs::read(oracle.join("normal")).unwrap()
+                );
+                assert_eq!(run(&f.repo, &["write-tree"]), run(&oracle, &["write-tree"]));
+                assert_eq!(
+                    run(&f.repo, &["rev-parse", "HEAD"]),
+                    run(&oracle, &["rev-parse", "HEAD"])
+                );
+                assert_eq!(
+                    stderr
+                        .lines()
+                        .filter(|line| *line == validation_line(f))
+                        .count(),
+                    1
+                );
+            });
+        }
     }
 }

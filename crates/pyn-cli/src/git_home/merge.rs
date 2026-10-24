@@ -134,6 +134,7 @@ pub(super) fn write_orig_head_as(git: &GitHome, id: &ObjectId, action: Option<&s
 }
 
 pub fn merge(git: &GitHome, mut args: MergeArgs) -> Result<()> {
+    git.repo.validate_diff_ignore_submodules()?;
     if args.preview {
         bail!("`pyn merge --preview` needs a pyn server; a git repository has no merge preview");
     }

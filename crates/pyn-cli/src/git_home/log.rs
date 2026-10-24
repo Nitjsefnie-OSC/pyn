@@ -453,6 +453,7 @@ pub(super) fn log(
     limit: Option<usize>,
     args: GitLogArgs,
 ) -> Result<()> {
+    git.repo.validate_diff_ignore_submodules()?;
     let Rendering { pretty, style } = args.fmt.rendering()?;
     let filters = Filters::new(&args)?;
     let parts = args.diff_parts();

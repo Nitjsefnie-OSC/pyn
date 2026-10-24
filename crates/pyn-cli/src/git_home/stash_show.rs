@@ -27,6 +27,7 @@ pub(super) struct ShowArgs {
 }
 
 pub(super) fn show(git: &GitHome, args: ShowArgs) -> Result<()> {
+    git.repo.validate_diff_ignore_submodules()?;
     if args.stash.len() > 1 {
         let named: Vec<String> = args.stash.iter().map(|s| format!("'{s}'")).collect();
         eprintln!("Too many revisions specified: {}", named.join(" "));

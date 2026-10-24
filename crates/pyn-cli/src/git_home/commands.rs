@@ -743,6 +743,7 @@ fn show(
     fmt: &FormatArgs,
     format: &diff::Format,
 ) -> Result<()> {
+    git.repo.validate_diff_ignore_submodules()?;
     let Rendering { pretty, style } = fmt.rendering()?;
     let id = match commit {
         Some(c) => git.repo.resolve(c)?,

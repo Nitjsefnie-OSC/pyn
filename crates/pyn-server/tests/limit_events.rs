@@ -613,6 +613,198 @@ async fn completed_upload_after_reservation_expiry_records_the_owner_limit_event
     assert_one_storage_event(&w, sub, 3).await;
 }
 
+// Mutants: the uploads.rs limit_result wrappers queue an owner storage_bytes event for the
+// unreferenced-upload ceiling; each test below drives one of the three wrapping sites and demands
+// the caller error, an empty outbox and a free (owner, storage_bytes) throttle slot all at once.
+#[tokio::test]
+async fn an_upload_refused_at_reservation_queues_nothing_and_leaves_the_storage_bytes_slot_free() {
+    use pyn_core::LimitsChange;
+
+    let w = world(Limits::default(), 2);
+    w.repos
+        .create(&who("alice"), &UserId::new("alice"), "game", None, None)
+        .await
+        .unwrap();
+    let open = w.repos.open("alice", "game").await.unwrap();
+    let principal = w
+        .access
+        .principal_in(&open.record.id, &who("alice"))
+        .await
+        .unwrap();
+    let kept = open.service.upload_blob(b"ab".to_vec()).await.unwrap();
+    let sub = subscribe(&w).await;
+    let err = open.service.upload_blob(b"c".to_vec()).await.unwrap_err();
+    assert_storage_error(&err, &open.record.id.to_string(), 2, 2);
+    assert_eq!(deliveries(&w, sub).await, 0);
+
+    w.access
+        .admin_for_tests(&UserId::new("root"))
+        .await
+        .unwrap();
+    w.access
+        .set_owner_limits(
+            &who("root"),
+            &UserId::new("alice"),
+            LimitsChange {
+                repositories: None,
+                members: None,
+                storage_bytes: Some(Some(1)),
+            },
+        )
+        .await
+        .unwrap();
+    let err = open
+        .service
+        .checkin(
+            &principal,
+            &RepoPath::new("file").unwrap(),
+            kept,
+            None,
+            "m".into(),
+        )
+        .await
+        .unwrap_err();
+    assert_storage_error(&err, "alice", 1, 0);
+    assert_one_storage_event(&w, sub, 1).await;
+}
+
+#[tokio::test]
+async fn an_upload_refused_at_recording_queues_nothing_and_leaves_the_storage_bytes_slot_free() {
+    use pyn_core::LimitsChange;
+    use pyn_core::object::Keying;
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+    use tokio::io::AsyncWriteExt;
+
+    let w = world(Limits::default(), 3);
+    w.repos
+        .create(&who("alice"), &UserId::new("alice"), "game", None, None)
+        .await
+        .unwrap();
+    let open = w.repos.open("alice", "game").await.unwrap();
+    let (mut writer, reader) = tokio::io::duplex(2);
+    let mut uploading =
+        Box::pin(
+            open.service
+                .upload(Box::pin(reader), Keying::Blob { len: 2 }, None, 2),
+        );
+    poll_fn(|cx| {
+        assert!(uploading.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+
+    w.clock.advance(Duration::hours(6) + Duration::seconds(1));
+    let kept = open.service.upload_blob(b"cd".to_vec()).await.unwrap();
+    let sub = subscribe(&w).await;
+    writer.write_all(b"ab").await.unwrap();
+    drop(writer);
+    let err = uploading.await.unwrap_err();
+    assert_storage_error(&err, &open.record.id.to_string(), 3, 2);
+    assert_eq!(deliveries(&w, sub).await, 0);
+
+    let principal = w
+        .access
+        .principal_in(&open.record.id, &who("alice"))
+        .await
+        .unwrap();
+    w.access
+        .admin_for_tests(&UserId::new("root"))
+        .await
+        .unwrap();
+    w.access
+        .set_owner_limits(
+            &who("root"),
+            &UserId::new("alice"),
+            LimitsChange {
+                repositories: None,
+                members: None,
+                storage_bytes: Some(Some(1)),
+            },
+        )
+        .await
+        .unwrap();
+    let err = open
+        .service
+        .checkin(
+            &principal,
+            &RepoPath::new("file").unwrap(),
+            kept,
+            None,
+            "m".into(),
+        )
+        .await
+        .unwrap_err();
+    assert_storage_error(&err, "alice", 1, 0);
+    assert_one_storage_event(&w, sub, 1).await;
+}
+
+#[tokio::test]
+async fn an_assembly_refused_at_recording_queues_nothing_and_leaves_the_storage_bytes_slot_free() {
+    use pyn_core::LimitsChange;
+    use pyn_core::object::Keying;
+
+    let w = world(Limits::default(), 3);
+    w.repos
+        .create(&who("alice"), &UserId::new("alice"), "game", None, None)
+        .await
+        .unwrap();
+    let open = w.repos.open("alice", "game").await.unwrap();
+    let principal = w
+        .access
+        .principal_in(&open.record.id, &who("alice"))
+        .await
+        .unwrap();
+    let chunk = open
+        .service
+        .upload(
+            Box::pin(std::io::Cursor::new(b"ab".to_vec())),
+            Keying::Raw,
+            None,
+            2,
+        )
+        .await
+        .unwrap();
+    let sub = subscribe(&w).await;
+    let err = open
+        .service
+        .assemble(&[chunk, chunk], None)
+        .await
+        .unwrap_err();
+    assert_storage_error(&err, &open.record.id.to_string(), 3, 0);
+    assert_eq!(deliveries(&w, sub).await, 0);
+
+    w.access
+        .admin_for_tests(&UserId::new("root"))
+        .await
+        .unwrap();
+    w.access
+        .set_owner_limits(
+            &who("root"),
+            &UserId::new("alice"),
+            LimitsChange {
+                repositories: None,
+                members: None,
+                storage_bytes: Some(Some(1)),
+            },
+        )
+        .await
+        .unwrap();
+    let err = open
+        .service
+        .checkin(
+            &principal,
+            &RepoPath::new("file").unwrap(),
+            chunk,
+            None,
+            "m".into(),
+        )
+        .await
+        .unwrap_err();
+    assert_storage_error(&err, "alice", 1, 0);
+    assert_one_storage_event(&w, sub, 1).await;
+}
+
 #[path = "common/failing_webhooks.rs"]
 mod failing_webhooks;
 

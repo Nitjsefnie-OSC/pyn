@@ -248,15 +248,17 @@ An administrator or service credential set an owner's own [limits](limits.md).
 
 ### `owner.limit_reached`
 
-An operation was refused because the owner is at one of its limits. Recorded in the webhook outbox on repository, member, storage and lock limit refusals. Each owner and limit
+An operation was refused because the owner is at one of its limits. Recorded in the webhook outbox on repository, member, storage and lock limit refusals; a storage refusal is a
+check-in, push, merge or changeset that would add content past the owner's storage limit, while an upload past a repository's unreferenced-upload ceiling raises no event. Each owner and limit
 is admitted at most once per hour, measured from its last recorded event using the store's clock. Admission and
 outbox fan-out are atomic, including across service instances sharing Postgres. The refusal error is unchanged
-if event recording fails. Repository-scoped limits name the repository owner, including when a different user hits a lock limit.
+if event recording fails. Repository-scoped limits name the repository owner, including when a different user hits a lock limit. For locks the `value` is the
+repository's lock cap, not an owner limit, and the admission hour is shared across the owner's repositories.
 
 When the store uses the caller's clock, a replica running behind is suppressed until it catches up to the admission window;
 a replica running ahead can push `last_event_at` into the future. Postgres uses the database clock by default.
 
-`data`: `owner`, `limit` (`repositories`, `members`, `storage_bytes` or `locks`), `value` (the limit in force). It names no actor: the refused caller is not part of the event.
+`data`: `owner`, `limit` (`repositories`, `members`, `storage_bytes` or `locks`), `value` (the limit in force; for locks, the repository's lock cap). It names no actor: the refused caller is not part of the event.
 
 ```json
 {

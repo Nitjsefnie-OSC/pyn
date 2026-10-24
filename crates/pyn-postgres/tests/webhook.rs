@@ -127,10 +127,8 @@ async fn limit_admission_and_outbox_use_database_time_with_skewed_callers() {
         .await
         .unwrap()
         .unwrap();
-    // Mutant: pass Some(now) to append_event_in instead of bound_now(now).
     assert!(event.created_at >= real);
     assert!(event.created_at < ahead);
-    // Mutant: bind the caller's now for admission instead of bound_now(now).
     assert!(
         store
             .append_limit_reached(&owner, "locks", "{}", ahead)

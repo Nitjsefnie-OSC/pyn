@@ -7,7 +7,6 @@ use pyn_core::{
     RepoService, Rules, ServiceConfig, UserId,
 };
 
-// Mutant: discard the recorder passed to RepoService::new.
 #[tokio::test]
 async fn a_direct_service_records_limits_without_a_builder() {
     let events = Arc::new(MemoryLimitEvents::new());

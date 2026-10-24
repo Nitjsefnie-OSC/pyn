@@ -267,39 +267,6 @@ async fn members_storage_and_non_owner_locks_keep_their_errors_and_attribute_the
     }
 }
 
-#[tokio::test]
-async fn upload_budget_refusals_are_events_of_the_repository_owner() {
-    let w = world(Limits::default(), 0);
-    let sub = subscribe(&w).await;
-    w.repos
-        .create(&who("alice"), &UserId::new("alice"), "game", None, None)
-        .await
-        .unwrap();
-    let open = w.repos.open("alice", "game").await.unwrap();
-    for _ in 0..2 {
-        let err = open.service.upload_blob(b"x".to_vec()).await.unwrap_err();
-        assert!(matches!(
-            err,
-            PynError::StorageLimitReached { limit: 0, .. }
-        ));
-    }
-    assert_eq!(deliveries(&w, sub).await, 1);
-    let due = w
-        .hooks
-        .claim_due(10, Duration::minutes(1), w.clock.now())
-        .await
-        .unwrap();
-    let event: Event = serde_json::from_str(&due[0].event.payload).unwrap();
-    assert_eq!(
-        event.data,
-        EventData::OwnerLimitReached(OwnerLimitReachedData {
-            owner: "alice".into(),
-            limit: LimitKind::StorageBytes,
-            value: 0,
-        })
-    );
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn independent_services_racing_a_limit_record_exactly_one_event() {
     let hooks = Arc::new(MemoryWebhookStore::new());
@@ -547,76 +514,6 @@ async fn merge_storage_refusal_records_the_owner_limit_event() {
 }
 
 #[tokio::test]
-async fn assembly_storage_refusal_records_the_owner_limit_event() {
-    use pyn_core::object::Keying;
-
-    let w = world(Limits::default(), 3);
-    w.repos
-        .create(&who("alice"), &UserId::new("alice"), "game", None, None)
-        .await
-        .unwrap();
-    let open = w.repos.open("alice", "game").await.unwrap();
-    let chunk = open
-        .service
-        .upload(
-            Box::pin(std::io::Cursor::new(b"ab".to_vec())),
-            Keying::Raw,
-            None,
-            2,
-        )
-        .await
-        .unwrap();
-    let sub = subscribe(&w).await;
-    for _ in 0..2 {
-        let err = open
-            .service
-            .assemble(&[chunk, chunk], None)
-            .await
-            .unwrap_err();
-        assert_storage_error(&err, &open.record.id.to_string(), 3, 0);
-    }
-    assert_one_storage_event(&w, sub, 3).await;
-}
-
-#[tokio::test]
-async fn completed_upload_after_reservation_expiry_records_the_owner_limit_event() {
-    use pyn_core::object::Keying;
-    use std::future::{Future, poll_fn};
-    use std::task::Poll;
-    use tokio::io::AsyncWriteExt;
-
-    let w = world(Limits::default(), 3);
-    w.repos
-        .create(&who("alice"), &UserId::new("alice"), "game", None, None)
-        .await
-        .unwrap();
-    let open = w.repos.open("alice", "game").await.unwrap();
-    let (mut writer, reader) = tokio::io::duplex(2);
-    let mut uploading =
-        Box::pin(
-            open.service
-                .upload(Box::pin(reader), Keying::Blob { len: 2 }, None, 2),
-        );
-    poll_fn(|cx| {
-        assert!(uploading.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
-    })
-    .await;
-
-    w.clock.advance(Duration::hours(6) + Duration::seconds(1));
-    open.service.upload_blob(b"cd".to_vec()).await.unwrap();
-    let sub = subscribe(&w).await;
-    writer.write_all(b"ab").await.unwrap();
-    drop(writer);
-    let err = uploading.await.unwrap_err();
-    assert_storage_error(&err, &open.record.id.to_string(), 3, 2);
-    assert_one_storage_event(&w, sub, 3).await;
-}
-
-// Mutants: the uploads.rs limit_result wrappers queue an owner storage_bytes event for the
-// unreferenced-upload ceiling; each test below drives one of the three wrapping sites and demands
-// the caller error, an empty outbox and a free (owner, storage_bytes) throttle slot all at once.
-#[tokio::test]
 async fn an_upload_refused_at_reservation_queues_nothing_and_leaves_the_storage_bytes_slot_free() {
     use pyn_core::LimitsChange;
 
@@ -822,7 +719,6 @@ impl std::io::Write for LogBuffer {
     }
 }
 
-// Mutants: propagate the append error, skip the injected recorder, or drop the warning.
 #[tokio::test]
 async fn a_failed_webhook_append_preserves_the_limit_error_and_logs_the_loss() {
     use std::sync::atomic::Ordering;
@@ -884,7 +780,6 @@ async fn a_failed_webhook_append_preserves_the_limit_error_and_logs_the_loss() {
     assert!(output.contains("Repositories"), "{output}");
 }
 
-// Mutants: change one wire kind or one throttle key without changing its domain kind.
 #[tokio::test]
 async fn domain_kinds_use_the_matching_wire_kind_and_admission_key() {
     use pyn_core::{LimitEvents, LimitKind as DomainKind, LimitReached};

@@ -547,43 +547,47 @@ fn malformed_submodule_gitfile() {
     }
 }
 
+fn record_stash(f: &Fixture) {
+    let base = run(&f.repo, &["rev-parse", "HEAD"]);
+    let tree = run(&f.repo, &["write-tree"]);
+    let index = run(
+        &f.repo,
+        &["commit-tree", tree.trim(), "-p", base.trim(), "-m", "index"],
+    );
+    let untracked = run(&f.repo, &["commit-tree", tree.trim(), "-m", "untracked"]);
+    let stash = run(
+        &f.repo,
+        &[
+            "commit-tree",
+            tree.trim(),
+            "-p",
+            base.trim(),
+            "-p",
+            index.trim(),
+            "-p",
+            untracked.trim(),
+            "-m",
+            "stash",
+        ],
+    );
+    run(
+        &f.repo,
+        &[
+            "update-ref",
+            "--create-reflog",
+            "-m",
+            "stash",
+            "refs/stash",
+            stash.trim(),
+        ],
+    );
+}
+
 #[test]
 fn stash_show_gitlinks() {
     each(|f| {
         f.state("staged");
-        let base = run(&f.repo, &["rev-parse", "HEAD"]);
-        let tree = run(&f.repo, &["write-tree"]);
-        let index = run(
-            &f.repo,
-            &["commit-tree", tree.trim(), "-p", base.trim(), "-m", "index"],
-        );
-        let untracked = run(&f.repo, &["commit-tree", tree.trim(), "-m", "untracked"]);
-        let stash = run(
-            &f.repo,
-            &[
-                "commit-tree",
-                tree.trim(),
-                "-p",
-                base.trim(),
-                "-p",
-                index.trim(),
-                "-p",
-                untracked.trim(),
-                "-m",
-                "stash",
-            ],
-        );
-        run(
-            &f.repo,
-            &[
-                "update-ref",
-                "--create-reflog",
-                "-m",
-                "stash",
-                "refs/stash",
-                stash.trim(),
-            ],
-        );
+        record_stash(f);
         f.same(&["stash", "show", "-p"]);
         f.same(&["stash", "show", "--only-untracked", "-p"]);
         f.configure(None, Some("all"), None);
@@ -1153,4 +1157,19 @@ fn diff_submodule_config_reads(source: &str) {
     ] {
         submodule_config_reads(source, &args);
     }
+}
+
+#[test]
+fn stash_show_numstat() {
+    each(|f| {
+        commit(&f.repo, "normal", b"one\n", "normal");
+        fs::write(f.repo.join("normal"), "two\n").unwrap();
+        run(&f.repo, &["add", "normal"]);
+        record_stash(f);
+        let want = run(&f.repo, &["stash", "show", "--numstat"]);
+        eprintln!("git stash show --numstat: {want:?}");
+        assert!(!want.is_empty());
+        f.same(&["stash", "show", "--numstat"]);
+        f.same(&["stash", "show", "--stat"]);
+    });
 }

@@ -1509,9 +1509,10 @@ patch, pyn merges it, so a clash is judged by the tree merge. A stash is named `
 `apply`, `show` and `branch`, any stash-like commit.
 
 `stash show` prints the diffstat by default (`stash.showStat`), or the patch with `-p`/`--patch` (`stash.showPatch`), both with
-`-p --stat`, and takes `--stat`, `--shortstat`, `--name-only`, `--name-status`, `-U<n>` and `-w`; `-u`/`--include-untracked` and
-`--only-untracked` (or `stash.showIncludeUntracked`) add the untracked files the stash saved. `--numstat` and other diff options
-are not built. `stash branch <name> [<stash>]` creates the branch at the commit the stash was made on, switches to it, applies
+`-p --stat`, and takes `--stat`, `--shortstat`, `--numstat`, `--name-only`, `--name-status`, `-U<n>` and `-w`;
+`-u`/`--include-untracked` and `--only-untracked` (or `stash.showIncludeUntracked`) add the untracked files the stash saved. Numeric output has the same
+format-combination limits as `diff --numstat`. `stash branch <name> [<stash>]` creates the branch at the commit the stash was
+made on, switches to it, applies
 the stash with `--index` and drops it (a conflict keeps it). `stash create [<message>]` prints a stash commit without storing it
 or changing the work tree (nothing is printed when there is nothing to stash), and `stash store [-m <message>] <commit>` puts
 such a commit on the list (`Created via "git stash store".` without `-m`; storing the newest entry again does nothing).

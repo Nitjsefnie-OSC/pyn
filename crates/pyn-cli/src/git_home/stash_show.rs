@@ -55,7 +55,7 @@ pub(super) fn show(git: &GitHome, args: ShowArgs) -> Result<()> {
         )?;
     }
     let f = &args.format;
-    let flagged = f.stat || f.shortstat || f.name_only || f.name_status || f.check;
+    let flagged = f.stat || f.shortstat || f.numstat || f.name_only || f.name_status || f.check;
     let (summary, patch) = if flagged || args.patch {
         (flagged, args.patch)
     } else {

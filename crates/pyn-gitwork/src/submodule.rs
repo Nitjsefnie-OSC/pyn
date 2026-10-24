@@ -98,6 +98,15 @@ impl Repo {
         })
     }
 
+    /// Validates the global diff setting without loading `.gitmodules`.
+    pub fn validate_diff_ignore_submodules(&self) -> Result<()> {
+        self.config()
+            .get("diff.ignoresubmodules")
+            .map(parse_ignore)
+            .transpose()
+            .map(|_| ())
+    }
+
     /// Submodule settings shared by one inspection of this repository.
     pub fn submodules(&self) -> Submodules<'_> {
         Submodules {

@@ -1344,6 +1344,44 @@ fn staged_gitlink_retains_directory_size() {
 }
 
 #[test]
+fn global_ignore_validation_without_gitlinks() {
+    each(|f| {
+        run(&f.repo, &["update-index", "--force-remove", "sub"]);
+        commit(&f.repo, "normal", b"one\n", "normal");
+        commit(&f.repo, "normal", b"two\n", "changed normal");
+        fs::write(f.repo.join("normal"), "three\n").unwrap();
+        run(&f.repo, &["add", "normal"]);
+        for value in [None, Some("bogus")] {
+            f.configure(value, None, None);
+            for args in [
+                vec!["diff", "--cached", "--", "normal"],
+                vec!["diff", "HEAD~1", "HEAD", "--", "normal"],
+                vec!["status", "-s", "--", "normal"],
+            ] {
+                let want = git(&f.repo).args(&args).output().unwrap();
+                eprintln!(
+                    "git {args:?}, global={value:?}: exit={:?}, stdout={:?}, stderr={:?}",
+                    want.status.code(),
+                    String::from_utf8_lossy(&want.stdout),
+                    String::from_utf8_lossy(&want.stderr)
+                );
+                assert_eq!(
+                    want.status.code(),
+                    Some(if value.is_some() { 128 } else { 0 })
+                );
+                if value.is_none() {
+                    assert!(!want.stdout.is_empty());
+                }
+                let got = f.pyn(&args);
+                assert_eq!(got.status.code(), want.status.code(), "{args:?}");
+                assert_eq!(got.stdout, want.stdout, "{args:?}");
+                assert_eq!(got.stderr, want.stderr, "{args:?}");
+            }
+        }
+    });
+}
+
+#[test]
 fn staging_gitlinks_respects_index_bits() {
     for flag in ["--assume-unchanged", "--skip-worktree"] {
         each(|f| {

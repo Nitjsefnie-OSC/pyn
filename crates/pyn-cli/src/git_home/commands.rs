@@ -623,6 +623,7 @@ fn diff(
     let only = repo_paths(git, cwd, &[loose.as_slice(), paths].concat())?;
     let spec = Pathspec::new(only.iter().map(|p| p.as_bytes().to_vec()));
     let repo = &git.repo;
+    repo.validate_diff_ignore_submodules()?;
     let modules = repo.submodules();
     let (mut old, mut new) = (Tree::new(), Tree::new());
     match revs.as_slice() {

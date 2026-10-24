@@ -100,11 +100,16 @@ impl Repo {
 
     /// Validates the global diff setting without loading `.gitmodules`.
     pub fn validate_diff_ignore_submodules(&self) -> Result<()> {
-        self.config()
-            .get("diff.ignoresubmodules")
-            .map(parse_ignore)
-            .transpose()
-            .map(|_| ())
+        if std::env::var_os("PYN_DEBUG_SUBMODULE_CONFIG").is_some() {
+            eprintln!(
+                "submodule config validation: {}",
+                self.git().git_dir().display()
+            );
+        }
+        for value in self.config().get_all("diff.ignoresubmodules") {
+            parse_ignore(value)?;
+        }
+        Ok(())
     }
 
     /// Submodule settings shared by one inspection of this repository.

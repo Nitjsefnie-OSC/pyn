@@ -1133,7 +1133,17 @@ fn submodule_config_reads(source: &str, args: &[&str]) {
         assert_eq!(String::from_utf8_lossy(&got.stdout), want);
         let stderr = String::from_utf8_lossy(&got.stderr);
         let mut counts = [0; 3];
+        assert_eq!(
+            stderr
+                .lines()
+                .filter(|line| *line == validation_line(&f))
+                .count(),
+            1
+        );
         for line in stderr.lines() {
+            if line.starts_with("submodule config validation: ") {
+                continue;
+            }
             let values = line
                 .strip_prefix("submodule config reads: ")
                 .expect("unexpected diagnostic");
@@ -1403,4 +1413,63 @@ fn staging_gitlinks_respects_index_bits() {
             assert_eq!(run(&f.repo, &["write-tree"]), run(&oracle, &["write-tree"]));
         });
     }
+}
+
+fn normal_fixture(f: &Fixture) {
+    run(&f.repo, &["update-index", "--force-remove", "sub"]);
+    f.state("missing");
+    commit(&f.repo, "normal", b"base\n", "normal");
+}
+
+fn duplicate_global_config(args: &[&str]) {
+    each(|f| {
+        normal_fixture(f);
+        fs::write(f.repo.join("normal"), "changed\n").unwrap();
+        run(&f.repo, &["add", "normal"]);
+        for (values, code) in [
+            (vec!["none", "all"], 0),
+            (vec!["bogus", "none"], 128),
+            (vec!["none", "bogus"], 128),
+            (vec!["bogus-first", "bogus-last", "none"], 128),
+        ] {
+            f.configure(None, None, None);
+            for value in &values {
+                run(
+                    &f.repo,
+                    &["config", "--add", "diff.ignoreSubmodules", value],
+                );
+            }
+            let want = git(&f.repo).args(args).output().unwrap();
+            eprintln!(
+                "git {args:?}, {values:?}: exit={:?}, stderr={:?}",
+                want.status.code(),
+                String::from_utf8_lossy(&want.stderr)
+            );
+            assert_eq!(want.status.code(), Some(code));
+            if code == 0 {
+                assert!(!want.stdout.is_empty());
+            }
+            let got = f.pyn(args);
+            assert_eq!(got.status.code(), want.status.code());
+            assert_eq!(got.stdout, want.stdout);
+            assert_eq!(got.stderr, want.stderr);
+        }
+    });
+}
+
+#[test]
+fn status_validates_all_global_values() {
+    duplicate_global_config(&["status", "-s"]);
+}
+
+#[test]
+fn diff_validates_all_global_values() {
+    duplicate_global_config(&["diff", "--cached", "--", "normal"]);
+}
+
+fn validation_line(f: &Fixture) -> String {
+    format!(
+        "submodule config validation: {}",
+        f.repo.join(".git").display()
+    )
 }

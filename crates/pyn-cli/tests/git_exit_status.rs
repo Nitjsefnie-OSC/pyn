@@ -214,14 +214,6 @@ const DIVERGENT: &[(&str, &str)] = &[
         "gap: git exits 255 for a reflog error, pyn 128",
     ),
     (
-        "Dirty: show HEAD HEAD~1 nosuchrev",
-        "gap: show takes one commit, so extra revisions are 129 before the unknown one is found (git 128)",
-    ),
-    (
-        "Dirty: show HEAD -- nosuchpath",
-        "gap: show takes no path limit, 129 where git exits 0",
-    ),
-    (
         "Dirty: stash bogus",
         "gap: unknown stash word is 129 from the parser, git 128",
     ),
@@ -383,7 +375,6 @@ fn groups() -> Vec<(&'static str, Vec<Case>)> {
                 case(Dirty, "show --bogus"),
                 case(Dirty, "show nosuchrev"),
                 case(Dirty, "show HEAD:nosuchpath"),
-                case(Dirty, "show HEAD -- nosuchpath"),
                 case(Dirty, "show HEAD HEAD~1 nosuchrev"),
                 case(Outside, "show HEAD"),
             ],

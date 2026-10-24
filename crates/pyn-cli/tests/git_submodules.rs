@@ -1224,52 +1224,52 @@ fn stash_show_numstat() {
 }
 
 fn numstat_paths(binary: bool) {
-    each(|f| {
-        let names = [
-            "plain",
-            "with space",
-            "line\nbreak",
-            "tab\tname",
-            "back\\slash",
-            "double\"quote",
-            "high-é",
-        ];
-        for name in names {
-            fs::write(
-                f.repo.join(name),
-                if binary {
-                    b"one\0\n".as_slice()
-                } else {
-                    b"one\n".as_slice()
-                },
-            )
-            .unwrap();
-        }
-        run(&f.repo, &["add", "."]);
-        run(&f.repo, &["commit", "-qm", "names"]);
-        for name in names {
-            fs::write(
-                f.repo.join(name),
-                if binary {
-                    b"two\0\n".as_slice()
-                } else {
-                    b"two\n".as_slice()
-                },
-            )
-            .unwrap();
-        }
-        let want = run(&f.repo, &["diff", "--numstat"]);
-        eprintln!("git numstat binary={binary}: {want:?}");
-        assert_eq!(want.lines().count(), names.len());
-        for value in ["true", "false"] {
+    for value in ["true", "false"] {
+        each(|f| {
+            let names = [
+                "plain",
+                "with space",
+                "line\nbreak",
+                "tab\tname",
+                "back\\slash",
+                "double\"quote",
+                "high-é",
+            ];
+            for name in names {
+                fs::write(
+                    f.repo.join(name),
+                    if binary {
+                        b"one\0\n".as_slice()
+                    } else {
+                        b"one\n".as_slice()
+                    },
+                )
+                .unwrap();
+            }
+            run(&f.repo, &["add", "."]);
+            run(&f.repo, &["commit", "-qm", "names"]);
+            for name in names {
+                fs::write(
+                    f.repo.join(name),
+                    if binary {
+                        b"two\0\n".as_slice()
+                    } else {
+                        b"two\n".as_slice()
+                    },
+                )
+                .unwrap();
+            }
+            let want = run(&f.repo, &["diff", "--numstat"]);
+            eprintln!("git numstat binary={binary}: {want:?}");
+            assert_eq!(want.lines().count(), names.len());
             run(&f.repo, &["config", "core.quotePath", value]);
             f.same(&["diff", "--numstat"]);
-        }
-        run(&f.repo, &["add", "."]);
-        f.same(&["diff", "--cached", "--numstat"]);
-        run(&f.repo, &["commit", "-qm", "changed names"]);
-        f.same(&["show", "--format=", "--numstat"]);
-    });
+            run(&f.repo, &["add", "."]);
+            f.same(&["diff", "--cached", "--numstat"]);
+            run(&f.repo, &["commit", "-qm", "changed names"]);
+            f.same(&["show", "--format=", "--numstat"]);
+        });
+    }
 }
 
 #[test]

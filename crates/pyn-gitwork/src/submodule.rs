@@ -244,6 +244,7 @@ impl Submodules<'_> {
             untracked: false,
         };
         if ignore != SubmoduleIgnore::Dirty {
+            sub.validate_diff_ignore_submodules()?;
             for e in sub.status()?.entries {
                 state.modified |= e.staged.is_some()
                     || match e.submodule {

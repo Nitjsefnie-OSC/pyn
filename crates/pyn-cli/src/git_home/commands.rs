@@ -276,6 +276,7 @@ fn short(id: &ObjectId) -> String {
 }
 
 pub(super) fn status(git: &GitHome, cwd: &Path, args: &StatusArgs) -> Result<()> {
+    git.repo.validate_diff_ignore_submodules()?;
     let mut status = git.repo.status()?;
     let specs = stage::resolve_specs(git, cwd, &args.paths)?;
     status.entries.retain(|e| specs.spec.matches(&e.path));

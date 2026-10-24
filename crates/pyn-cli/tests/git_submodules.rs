@@ -1473,3 +1473,176 @@ fn validation_line(f: &Fixture) -> String {
         f.repo.join(".git").display()
     )
 }
+
+fn normal_stash(f: &Fixture) {
+    let original = fs::read(f.repo.join("normal")).unwrap();
+    let head = run(&f.repo, &["rev-parse", "HEAD"]);
+    let tree = run(&f.repo, &["rev-parse", "HEAD^{tree}"]);
+    let index = run(
+        &f.repo,
+        &["commit-tree", tree.trim(), "-p", head.trim(), "-m", "index"],
+    );
+    fs::write(f.repo.join("normal"), "stash\n").unwrap();
+    run(&f.repo, &["add", "normal"]);
+    let tree = run(&f.repo, &["write-tree"]);
+    let stash = run(
+        &f.repo,
+        &[
+            "commit-tree",
+            tree.trim(),
+            "-p",
+            head.trim(),
+            "-p",
+            index.trim(),
+            "-m",
+            "stash",
+        ],
+    );
+    run(
+        &f.repo,
+        &[
+            "update-ref",
+            "--create-reflog",
+            "-m",
+            "stash",
+            "refs/stash",
+            stash.trim(),
+        ],
+    );
+    run(&f.repo, &["read-tree", "HEAD"]);
+    fs::write(f.repo.join("normal"), original).unwrap();
+}
+
+fn stash_completion(verb: &str) {
+    for default in [None, Some("bogus")] {
+        each(|f| {
+            normal_fixture(f);
+            normal_stash(f);
+            f.configure(default, None, None);
+            let oracle = f.repo.parent().unwrap().join("oracle");
+            gitfix::copy_tree(&f.repo, &oracle);
+            let want = git(&oracle).args(["stash", verb]).output().unwrap();
+            eprintln!(
+                "git stash {verb}, {default:?}: exit={:?}, stderr={:?}",
+                want.status.code(),
+                String::from_utf8_lossy(&want.stderr)
+            );
+            assert_eq!(want.status.code(), Some(0));
+            let got = f.pyn(&["stash", verb]);
+            assert_eq!(
+                got.status.code(),
+                want.status.code(),
+                "{}",
+                String::from_utf8_lossy(&got.stderr)
+            );
+            assert_eq!(got.stderr, want.stderr);
+            assert_eq!(
+                fs::read(f.repo.join("normal")).unwrap(),
+                fs::read(oracle.join("normal")).unwrap()
+            );
+            assert_eq!(fs::read(f.repo.join("normal")).unwrap(), b"stash\n");
+            assert_eq!(run(&f.repo, &["write-tree"]), run(&oracle, &["write-tree"]));
+            assert_eq!(
+                run(&f.repo, &["ls-files", "--stage"]),
+                run(&oracle, &["ls-files", "--stage"])
+            );
+            let want_ref = git(&oracle)
+                .args(["rev-parse", "--verify", "refs/stash"])
+                .output()
+                .unwrap();
+            let got_ref = git(&f.repo)
+                .args(["rev-parse", "--verify", "refs/stash"])
+                .output()
+                .unwrap();
+            assert_eq!(want_ref.status.success(), verb == "apply");
+            assert_eq!(got_ref.status.code(), want_ref.status.code());
+            assert_eq!(got_ref.stdout, want_ref.stdout);
+            if default.is_some() {
+                assert_eq!(got.stdout, want.stdout);
+            } else {
+                assert!(!want.stdout.is_empty() && !got.stdout.is_empty());
+            }
+        });
+    }
+}
+
+#[test]
+fn stash_apply_completion() {
+    stash_completion("apply");
+}
+
+#[test]
+fn stash_pop_completion() {
+    stash_completion("pop");
+}
+
+#[test]
+fn empty_pick_status_reporting() {
+    for default in [None, Some("bogus")] {
+        each(|f| {
+            normal_fixture(f);
+            f.configure(default, None, None);
+            run(&f.repo, &["config", "user.name", "t"]);
+            run(&f.repo, &["config", "user.email", "t@example.com"]);
+            let oracle = f.repo.parent().unwrap().join("oracle");
+            gitfix::copy_tree(&f.repo, &oracle);
+            let want = git(&oracle).args(["cherry-pick", "HEAD"]).output().unwrap();
+            eprintln!(
+                "git empty pick, {default:?}: exit={:?}, stderr={:?}",
+                want.status.code(),
+                String::from_utf8_lossy(&want.stderr)
+            );
+            assert_eq!(
+                want.status.code(),
+                Some(if default.is_some() { 128 } else { 1 })
+            );
+            let got = f.pyn(&["cherry-pick", "HEAD"]);
+            assert_eq!(got.status.code(), want.status.code());
+            for name in ["CHERRY_PICK_HEAD", "MERGE_MSG"] {
+                assert_eq!(
+                    fs::read(f.repo.join(".git").join(name)).unwrap(),
+                    fs::read(oracle.join(".git").join(name)).unwrap()
+                );
+            }
+            assert_eq!(run(&f.repo, &["write-tree"]), run(&oracle, &["write-tree"]));
+            assert_eq!(
+                run(&f.repo, &["rev-parse", "HEAD"]),
+                run(&oracle, &["rev-parse", "HEAD"])
+            );
+            if default.is_some() {
+                assert_eq!(got.stderr, want.stderr);
+                assert_eq!(got.stdout, want.stdout);
+            } else {
+                assert!(!want.stdout.is_empty() && !got.stdout.is_empty());
+            }
+        });
+    }
+}
+
+#[test]
+fn recursive_status_validates_child_config() {
+    for default in [None, Some("bogus")] {
+        each(|f| {
+            f.state("tracked");
+            if let Some(value) = default {
+                run(&f.sub, &["config", "diff.ignoreSubmodules", value]);
+            }
+            let want = git(&f.repo).args(["status", "-s"]).output().unwrap();
+            let got = f.pyn(&["status", "-s"]);
+            assert_eq!(
+                want.status.code(),
+                Some(if default.is_some() { 128 } else { 0 })
+            );
+            assert_eq!(got.status.code(), want.status.code());
+            assert_eq!(got.stdout, want.stdout);
+            if default.is_some() {
+                let want = String::from_utf8_lossy(&want.stderr);
+                let got = String::from_utf8_lossy(&got.stderr);
+                assert_eq!(got.lines().next(), want.lines().next());
+            } else {
+                assert!(!want.stdout.is_empty());
+                assert_eq!(got.stderr, want.stderr);
+            }
+        });
+    }
+}

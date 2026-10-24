@@ -178,7 +178,6 @@ fn is_link(mode: FileMode) -> bool {
 
 impl Repo {
     pub fn status(&self) -> Result<Status> {
-        self.validate_diff_ignore_submodules()?;
         let head = self.head()?;
         let index = self.read_index()?;
         let modules = self.submodules();

@@ -226,11 +226,15 @@ impl ObjectDb {
         Ok(())
     }
 
-    /// Extends a minimum of at least two hex digits using pack-index searches and one loose fan-out read per store.
+    /// Refreshes pack metadata, then extends at least two hex digits using index searches and one loose
+    /// fan-out read per store. A failed refresh selects the full hash width.
     pub fn abbreviation_len(&self, id: &ObjectId, minimum: usize) -> usize {
         let full = self.algorithm.digest_len() * 2;
         let mut len = minimum.min(full);
         if len == full {
+            return full;
+        }
+        if self.rescan_packs().is_err() {
             return full;
         }
         for pack in self.packs() {
@@ -289,9 +293,10 @@ impl ObjectDb {
         }
         found.sort();
         let mut packs = self.packs.write().expect("pack list lock");
+        let known: HashSet<_> = packs.iter().map(|p| p.idx_path().to_path_buf()).collect();
         let mut added = false;
         for idx in found {
-            if packs.iter().all(|p| p.idx_path() != idx) {
+            if !known.contains(&idx) {
                 packs.push(Arc::new(Pack::open(&idx, self.algorithm)?));
                 added = true;
             }

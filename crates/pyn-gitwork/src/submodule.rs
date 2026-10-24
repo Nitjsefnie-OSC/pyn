@@ -1,7 +1,8 @@
 //! Read-only gitlink inspection and the superproject's submodule ignore settings.
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use pyn_git::Config;
 use pyn_object::ObjectId;
@@ -33,8 +34,8 @@ impl SubmoduleStatus {
     }
 }
 
-#[derive(Default)]
 struct ConfigReads {
+    git_dir: PathBuf,
     parses: usize,
     index: usize,
     head: usize,
@@ -44,8 +45,11 @@ impl Drop for ConfigReads {
     fn drop(&mut self) {
         if std::env::var_os("PYN_DEBUG_SUBMODULE_CONFIG").is_some() {
             eprintln!(
-                "submodule config reads: parses={} index={} head={}",
-                self.parses, self.index, self.head
+                "submodule config reads: parses={} index={} head={} repo={}",
+                self.parses,
+                self.index,
+                self.head,
+                self.git_dir.display()
             );
         }
     }
@@ -53,7 +57,12 @@ impl Drop for ConfigReads {
 
 impl Repo {
     fn gitmodules(&self) -> Result<Config> {
-        let mut reads = ConfigReads::default();
+        let mut reads = ConfigReads {
+            git_dir: self.git().git_dir().to_path_buf(),
+            parses: 0,
+            index: 0,
+            head: 0,
+        };
         let file = self.root()?.join(".gitmodules");
         match std::fs::symlink_metadata(&file) {
             Ok(m) if m.is_file() => {
@@ -117,6 +126,7 @@ impl Repo {
         Submodules {
             repo: self,
             config: OnceCell::new(),
+            children: RefCell::new(HashMap::new()),
         }
     }
 
@@ -147,10 +157,17 @@ struct SubmoduleConfig {
     default: Option<String>,
 }
 
-/// Lazily loaded submodule settings for one status or diff operation.
+struct ChildInspection {
+    repo: Repo,
+    head: Option<ObjectId>,
+    dirt: Option<(bool, bool)>,
+}
+
+/// Lazily loaded submodule settings and child inspections for one status or diff operation.
 pub struct Submodules<'a> {
     repo: &'a Repo,
     config: OnceCell<SubmoduleConfig>,
+    children: RefCell<HashMap<Vec<u8>, ChildInspection>>,
 }
 
 impl Submodules<'_> {
@@ -235,8 +252,20 @@ impl Submodules<'_> {
         if !root.join(".git").exists() {
             return Ok(None);
         }
-        let sub = self.repo.open_submodule(&root)?;
-        let head = sub.head_commit()?.unwrap_or(recorded);
+        let mut children = self.children.borrow_mut();
+        let child = match children.entry(path.to_vec()) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let repo = self.repo.open_submodule(&root)?;
+                let head = repo.head_commit()?;
+                e.insert(ChildInspection {
+                    repo,
+                    head,
+                    dirt: None,
+                })
+            }
+        };
+        let head = child.head.unwrap_or(recorded);
         let mut state = SubmoduleStatus {
             head,
             new_commits: head != recorded,
@@ -244,17 +273,24 @@ impl Submodules<'_> {
             untracked: false,
         };
         if ignore != SubmoduleIgnore::Dirty {
-            sub.validate_diff_ignore_submodules()?;
-            for e in sub.status()?.entries {
-                state.modified |= e.staged.is_some()
-                    || match e.submodule {
-                        Some(nested) => nested.new_commits || nested.modified,
-                        None => e.unstaged.is_some_and(|k| k != Kind::Untracked),
-                    };
-                state.untracked |=
-                    e.unstaged == Some(Kind::Untracked) || e.submodule.is_some_and(|s| s.untracked);
+            if child.dirt.is_none() {
+                child.repo.validate_diff_ignore_submodules()?;
+                let (mut modified, mut untracked) = (false, false);
+                for e in child.repo.status()?.entries {
+                    modified |= e.staged.is_some()
+                        || match e.submodule {
+                            Some(nested) => nested.new_commits || nested.modified,
+                            None => e.unstaged.is_some_and(|k| k != Kind::Untracked),
+                        };
+                    untracked |= e.unstaged == Some(Kind::Untracked)
+                        || e.submodule.is_some_and(|s| s.untracked);
+                }
+                // Keep untracked dirt until the caller's status/diff policy is applied.
+                child.dirt = Some((modified, untracked));
             }
-            state.untracked &= ignore != SubmoduleIgnore::Untracked;
+            let (modified, untracked) = child.dirt.expect("child inspected");
+            state.modified = modified;
+            state.untracked = untracked && ignore != SubmoduleIgnore::Untracked;
         }
         Ok(Some(state))
     }

@@ -669,6 +669,9 @@ fn nested_untracked_default_diff() {
             let f = Fixture::new(format, gitfile);
             let nested = f.nested(format);
             fs::write(nested.join("new"), "untracked\n").unwrap();
+            assert!(!run(&f.repo, &["status", "-s"]).is_empty());
+            assert!(run(&f.repo, &["diff"]).is_empty());
+            f.same(&["status", "-s"]);
             f.same(&["diff"]);
             f.same(&["diff", "HEAD"]);
             fs::write(nested.join("file"), "tracked\n").unwrap();
@@ -1165,6 +1168,92 @@ fn submodule_config_reads(source: &str, args: &[&str]) {
             "{args:?}, {source}: {stderr}"
         );
     }
+}
+
+fn nested_config_reads(args: &[&str]) {
+    each(|f| {
+        let format = run(&f.repo, &["rev-parse", "--show-object-format"]);
+        let nested = f.nested(format.trim());
+        fs::write(nested.join("file"), "dirty\n").unwrap();
+        let want = git(&f.repo).args(args).output().unwrap();
+        assert!(want.status.success());
+        assert!(!want.stdout.is_empty());
+        assert!(want.stderr.is_empty());
+        let got = f
+            .command(args)
+            .env("PYN_DEBUG_SUBMODULE_CONFIG", "1")
+            .output()
+            .unwrap();
+        assert_eq!(got.status.code(), want.status.code());
+        assert_eq!(got.stdout, want.stdout);
+        let stderr = String::from_utf8_lossy(&got.stderr);
+        let reads: Vec<_> = stderr
+            .lines()
+            .filter(|line| line.starts_with("submodule config reads: "))
+            .collect();
+        assert_eq!(reads.len(), 2, "{args:?}: {stderr}");
+        for dir in [f.repo.join(".git"), f.sub_git_dir()] {
+            let event = format!(
+                "submodule config reads: parses=1 index=0 head=0 repo={}",
+                dir.display()
+            );
+            assert_eq!(
+                reads.iter().filter(|line| **line == event).count(),
+                1,
+                "{stderr}"
+            );
+        }
+    });
+}
+
+fn nested_ignore_warning(args: &[&str]) {
+    each(|f| {
+        let format = run(&f.repo, &["rev-parse", "--show-object-format"]);
+        let nested = f.nested(format.trim());
+        fs::write(nested.join("file"), "dirty\n").unwrap();
+        fs::write(
+            f.sub.join(".gitmodules"),
+            "[submodule \"inner\"]\n path = nested\n url = ../inner\n ignore = bogus\n",
+        )
+        .unwrap();
+        let want = git(&f.repo).args(args).output().unwrap();
+        eprintln!(
+            "git {args:?}: status={}, stdout={:?}, stderr={:?}",
+            want.status,
+            String::from_utf8_lossy(&want.stdout),
+            String::from_utf8_lossy(&want.stderr)
+        );
+        assert!(want.status.success());
+        assert!(!want.stdout.is_empty());
+        assert_eq!(String::from_utf8_lossy(&want.stderr).lines().count(), 1);
+        let got = f.pyn(args);
+        assert_eq!(got.status.code(), want.status.code());
+        assert_eq!(got.stdout, want.stdout);
+        assert_eq!(
+            String::from_utf8_lossy(&got.stderr),
+            String::from_utf8_lossy(&want.stderr)
+        );
+    });
+}
+
+#[test]
+fn nested_status_parses_submodule_config_once() {
+    nested_config_reads(&["status", "-s"]);
+}
+
+#[test]
+fn nested_diff_parses_submodule_config_once() {
+    nested_config_reads(&["diff"]);
+}
+
+#[test]
+fn nested_status_warns_once() {
+    nested_ignore_warning(&["status", "-s"]);
+}
+
+#[test]
+fn nested_diff_warns_once() {
+    nested_ignore_warning(&["diff"]);
 }
 
 #[test]

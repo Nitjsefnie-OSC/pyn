@@ -15,13 +15,18 @@ if ! [[ $current =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 echo "current version: $current"
 
-read -r -p "next semantic version: " version
+read -r -p "next semantic version: " version || { echo "no version entered" >&2; exit 1; }
 if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "invalid version '$version': expected three dot-separated numbers, e.g. 0.1.0" >&2
   exit 1
 fi
 
-read -r -p "optional label, empty for none (e.g. alpha): " label
+if [ "$version" = "$current" ]; then
+  echo "version '$version' is already the current version" >&2
+  exit 1
+fi
+
+read -r -p "optional label, empty for none (e.g. alpha): " label || { echo "no label entered" >&2; exit 1; }
 if ! [[ $label =~ ^[0-9A-Za-z.-]*$ ]]; then
   echo "invalid label '$label': use letters, digits, dots or dashes" >&2
   exit 1
@@ -30,6 +35,11 @@ fi
 tag=$version
 if [ -n "$label" ]; then
   tag="$version-$label"
+fi
+
+if ! git check-ref-format --allow-onelevel "$tag"; then
+  echo "invalid tag name '$tag'" >&2
+  exit 1
 fi
 
 # The members pin their intra-workspace dependencies at the workspace version,

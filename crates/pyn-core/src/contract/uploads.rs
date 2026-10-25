@@ -302,8 +302,8 @@ pub async fn upload_reservations_hold_the_budget_until_released_or_expired(store
 
 pub async fn parallel_uploads_never_pass_the_unreferenced_budget(store: Store) {
     // Seven of the eight uploads wait for the budget gate, which releases them only once the first
-    // upload's bytes are recorded while its reservation is still held; their single reserve attempts
-    // therefore all land inside that window.
+    // upload's bytes are recorded, before its separate release call; their single reserve attempts
+    // therefore all land inside the window that would double-count an unconsumed reservation.
     let store: Store = BudgetGateStore::new(store, 7);
     let h = harness(store.clone());
     let svc = capped_service(&h, &store, "parallel", 10);
@@ -466,8 +466,16 @@ pub async fn a_failed_upload_keeps_an_object_another_repository_recorded(store: 
 pub async fn an_object_is_reported_referenced_once_any_repository_recorded_it(store: Store) {
     let id = ObjectId::from_hex(pyn_object::Algorithm::Sha256, &"11".repeat(32)).unwrap();
     assert!(!store.object_is_recorded(&id).await.unwrap());
+    // No reservation backs this synthetic record; 0 is never a live reservation id (both stores
+    // number them from 1), so consuming it removes nothing.
     store
-        .record_upload(&RepoId::new("elsewhere"), &id, 1, 100)
+        .record_upload(
+            &RepoId::new("elsewhere"),
+            &id,
+            1,
+            100,
+            crate::UploadReservation(0),
+        )
         .await
         .unwrap();
     assert!(store.object_is_recorded(&id).await.unwrap());
@@ -541,10 +549,11 @@ pub async fn audit_details_carry_a_bounded_message(store: Store) {
 }
 
 /// Holds the budget race open for `parallel_uploads_never_pass_the_unreferenced_budget`: the first
-/// `record_upload` forwards to the inner store while its upload's reservation is still held, then
-/// keeps the upload parked until every competitor's single `reserve_upload` attempt has completed
-/// inside that window. While parked, the upload's bytes are counted both in `unreferenced` and as a
-/// held reservation, so every budget check in the window sees the same bytes twice.
+/// `record_upload` forwards to the inner store, then keeps the upload parked until every
+/// competitor's single `reserve_upload` attempt has completed. The park makes the race
+/// deterministic: with a budget that counts an upload's bytes in both `unreferenced` and its
+/// still-held reservation, every competitor is refused; with a budget that counts each byte once,
+/// the first competitor still fits.
 struct BudgetGateStore {
     inner: Store,
     /// Set by the first reserve; every later reserve belongs to a competitor and is held until the
@@ -841,18 +850,25 @@ impl MetadataStore for BudgetGateStore {
         id: &ObjectId,
         size: u64,
         cap: u64,
+        reservation: crate::UploadReservation,
     ) -> crate::Result<()> {
         if self.first_record.swap(true, Ordering::SeqCst) {
-            return self.inner.record_upload(repo, id, size, cap).await;
+            return self
+                .inner
+                .record_upload(repo, id, size, cap, reservation)
+                .await;
         }
-        // Forward first: from here the upload's bytes count in `unreferenced` while its
-        // reservation is still held. The reservation is released only after this call returns,
-        // so parking here holds the window open.
-        let out = self.inner.record_upload(repo, id, size, cap).await;
+        // Forward first: the bytes land in `unreferenced` before the gate opens, so every
+        // competitor's single reserve attempt happens between this record and this upload's
+        // release — the window a double-counting budget gets wrong.
+        let out = self
+            .inner
+            .record_upload(repo, id, size, cap, reservation)
+            .await;
         self.first_record_done.store(true, Ordering::SeqCst);
-        // Keep the upload parked (its reservation still held) until every competitor's single
-        // reserve attempt has completed inside the window; a budget that counts bytes once
-        // refuses six of the seven here and admits the one that still fits.
+        // Keep the upload parked here until every competitor's single reserve attempt has
+        // completed; a budget that counts bytes once admits one of the seven here and refuses
+        // the rest for real.
         self.wait_for(
             |g| g.competitors.load(Ordering::SeqCst) >= g.want,
             "record gate",

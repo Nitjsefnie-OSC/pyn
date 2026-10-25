@@ -12,6 +12,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use gitsrv::*;
 use tempfile::{TempDir, tempdir};
@@ -737,6 +738,37 @@ fn a_git_host_is_cloned_as_git_after_the_probe_finds_no_pyn_server() {
     );
     assert!(t.pyn_dir("probed").join(".git").is_dir());
     assert!(server.log().iter().any(|s| s.target == "/openapi.json"));
+}
+
+#[test]
+fn the_probe_is_observed_by_the_server_even_when_its_handling_is_delayed() {
+    let t = Arc::new(Rig::new("sha1", Via::Http));
+    let nested = t.root.join("team");
+    fs::create_dir_all(&nested).unwrap();
+    fs::rename(&t.bare, nested.join("served.git")).unwrap();
+    let server = t.server.as_ref().unwrap();
+    let url = format!("{}/team/served.git", server.url);
+    server.clear_log();
+    // The hold parks the finished /openapi.json handling before it is logged and answered, so the
+    // pyn client's probe times out while the server still holds the completed handling.
+    server.arm_openapi_hold();
+    let worker = {
+        let (t, url) = (t.clone(), url.clone());
+        std::thread::spawn(move || t.pyn_clone(&url, &[], Some("probed")))
+    };
+    let o = worker.join().unwrap();
+    // Read while the hold is still armed: the entry provably cannot have been logged yet, because
+    // the handling was parked when the process exited. The release runs before any assertion so a
+    // failure here can never strand the latched request and hang the server teardown.
+    let logged = server.log().iter().any(|s| s.target == "/openapi.json");
+    server.release_openapi_hold();
+    assert_ok(&o);
+    assert!(
+        logged,
+        "the probe's /openapi.json handling was delayed past the clone process's exit, and the \
+         server had not logged it by the time the process was reaped: the log held {:?}",
+        server.log()
+    );
 }
 
 #[test]

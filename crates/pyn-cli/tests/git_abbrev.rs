@@ -17,6 +17,8 @@ fn git_command(repo: &Repo, dir: &Path) -> Command {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env_remove("XDG_CONFIG_HOME")
         .env("TZ", "UTC")
+        .env("GIT_AUTHOR_NAME", "Staging Author")
+        .env("GIT_AUTHOR_EMAIL", "staging@example.com")
         .env("GIT_COMMITTER_NAME", "Staging Committer")
         .env("GIT_COMMITTER_EMAIL", "committer@example.com")
         .env("GIT_COMMITTER_DATE", "1700000100 -0530");
@@ -835,5 +837,86 @@ fn git_renderers_share_the_configured_policy() {
             repo.ok(&["tag", "-d", "abbrev-policy"]),
             format!("Deleted tag 'abbrev-policy' (was {})\n", &id[..12])
         );
+    }
+}
+
+#[test]
+fn decorated_log_and_from_labels_match_git_at_nondefault_widths() {
+    // Kills a rebase join that loses either side: upstream's ref decorations and
+    // `(from <parent>)` labels share their rendered line with the abbreviation policy.
+    for format in FORMATS {
+        let full = if format == "sha1" { 40 } else { 64 };
+        for (config, flag, width) in [
+            (None, "", 7),
+            (None, "--abbrev=12", 12),
+            (Some("12"), "", 12),
+            (Some("12"), "--abbrev=12", 12),
+            (Some("off"), "--no-abbrev", full),
+        ] {
+            // A decorated log line: upstream's decoration joined with the width in one line.
+            let repo = Repo::new(format);
+            if let Some(value) = config {
+                setting(&repo, value);
+            }
+            let mut log_args = vec!["log", "-n", "1", "--decorate=short"];
+            if !flag.is_empty() {
+                log_args.push(flag);
+            }
+            let out = same(&repo, &log_args);
+            let head = out.lines().next().unwrap();
+            assert!(head.contains('('), "no decoration on {head}");
+            assert!(out.contains("tag: "), "no tag in {out}");
+            // The medium header keeps the full id at every width, as git prints it.
+            let id = head.split_whitespace().nth(1).unwrap();
+            assert_eq!(id.len(), full, "{head}");
+
+            let mut oneline_args = vec!["log", "-n", "2", "--oneline", "--decorate=short"];
+            if !flag.is_empty() {
+                oneline_args.push(flag);
+            }
+            let oneline_out = same(&repo, &oneline_args);
+            // Only ref-carrying lines decorate, as in git: assert the head line.
+            assert!(
+                oneline_out.lines().next().unwrap().contains('('),
+                "no decoration on {}",
+                oneline_out.lines().next().unwrap()
+            );
+            for line in oneline_out.lines() {
+                let id = line.split_whitespace().next().unwrap();
+                assert_eq!(id.len(), width, "{line}");
+            }
+        }
+        // Upstream's `(from <parent>)` label, a `show -m` surface, joined with an
+        // overridden width.
+        let repo = Repo::merge(format);
+        git(
+            &repo,
+            &repo.main,
+            &["merge", "--no-ff", "--no-edit", "-q", "clean"],
+        );
+        let out = same(&repo, &["show", "-m", "--oneline", "--abbrev=12", "HEAD"]);
+        assert!(out.contains(" (from "), "no (from) label in {out}");
+        for line in out.lines().filter(|l| l.contains(" (from ")) {
+            let id = line
+                .split(" (from ")
+                .nth(1)
+                .unwrap()
+                .split(')')
+                .next()
+                .unwrap();
+            assert_eq!(id.len(), 12, "{line}");
+        }
+        // The label renders the full id under `--no-abbrev`.
+        let out = same(&repo, &["show", "-m", "--oneline", "--no-abbrev", "HEAD"]);
+        for line in out.lines().filter(|l| l.contains(" (from ")) {
+            let id = line
+                .split(" (from ")
+                .nth(1)
+                .unwrap()
+                .split(')')
+                .next()
+                .unwrap();
+            assert_eq!(id.len(), full, "{line}");
+        }
     }
 }

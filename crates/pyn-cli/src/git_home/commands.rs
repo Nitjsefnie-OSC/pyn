@@ -328,8 +328,8 @@ fn short(id: &ObjectId) -> String {
 
 pub(super) fn status(git: &GitHome, cwd: &Path, args: &StatusArgs) -> Result<()> {
     git.repo.validate_diff_ignore_submodules()?;
-    let mut status = git.repo.status()?;
     let specs = stage::resolve_specs(git, cwd, &args.paths)?;
+    let mut status = git.repo.status_in(&specs.spec)?;
     status.entries.retain(|e| specs.spec.matches(&e.path));
     let format = args.format();
     if format != Format::Table {
@@ -730,7 +730,7 @@ fn check_loose(cwd: &Path, loose: &[String], separated: bool) -> Result<()> {
         return Ok(());
     }
     for (i, arg) in loose.iter().enumerate() {
-        if arg.starts_with(':') || std::fs::symlink_metadata(cwd.join(arg)).is_ok() {
+        if stage::looks_like_pathspec(arg) || std::fs::symlink_metadata(cwd.join(arg)).is_ok() {
             continue;
         }
         if i > 0 {
@@ -745,14 +745,6 @@ fn check_loose(cwd: &Path, loose: &[String], separated: bool) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn repo_paths(git: &GitHome, cwd: &Path, paths: &[String]) -> Result<Vec<String>> {
-    paths
-        .iter()
-        .filter(|p| p.as_str() != ".")
-        .map(|p| git.ws.repo_path(cwd, p))
-        .collect()
-}
-
 fn diff(
     git: &GitHome,
     cwd: &Path,
@@ -765,8 +757,7 @@ fn diff(
     let separated = !paths.is_empty() || std::env::args_os().any(|a| a == "--");
     let (revs, loose) = split_revisions(git, cwd, args, separated, 2)?;
     check_loose(cwd, &loose, separated)?;
-    let only = repo_paths(git, cwd, &[loose.as_slice(), paths].concat())?;
-    let spec = Pathspec::new(only.iter().map(|p| p.as_bytes().to_vec()));
+    let spec = git.pathspec(cwd, &[loose.as_slice(), paths].concat(), false)?;
     let repo = &git.repo;
     repo.validate_diff_ignore_submodules()?;
     let modules = repo.submodules();
@@ -861,7 +852,7 @@ fn diff(
     }
     filter_gitlinks(&modules, &mut old, &mut new)?;
     let mut out = String::new();
-    let differs = diff::compare(git, &old, &new, &only, format, &mut out)?;
+    let differs = diff::compare(git, &old, &new, &[], format, &mut out)?;
     if !quiet {
         emit(&out);
         diff::exit_if_check_failed(format, &out);
@@ -911,8 +902,7 @@ fn show(
     if ids.is_empty() {
         ids.push(head_or_refuse(git)?);
     }
-    let only = repo_paths(git, cwd, &[loose.as_slice(), paths].concat())?;
-    let spec = Pathspec::new(only.iter().map(|p| p.as_bytes().to_vec()));
+    let spec = git.pathspec(cwd, &[loose.as_slice(), paths].concat(), false)?;
     let names = decorate.names(git, pretty.uses_decorations())?;
     let ctx = Context {
         style,
@@ -923,7 +913,7 @@ fn show(
         git,
         pretty: &pretty,
         spec: &spec,
-        only: &only,
+        only: &[],
         quiet: no_patch,
     };
     let mut out = String::new();
@@ -941,7 +931,7 @@ fn show(
                 .diff_trees(old_tree.as_ref(), Some(&c.tree), &spec)?;
             add_changes(git, &mut old, &mut new, &changes)?;
             let mut text = String::new();
-            let differs = diff::compare(git, &old, &new, &only, format, &mut text)?;
+            let differs = diff::compare(git, &old, &new, &[], format, &mut text)?;
             if no_patch {
                 return Ok(differs.then(|| Body {
                     text: String::new(),

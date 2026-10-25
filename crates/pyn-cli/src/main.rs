@@ -33,6 +33,7 @@ mod ls_remote;
 mod merging;
 mod migrate;
 mod mv_plan;
+mod pathspec;
 mod probe;
 mod pyn_server;
 mod quiet;
@@ -947,12 +948,6 @@ fn main() {
     {
         eprintln!("fatal: No pathspec was given. Which files should I remove?");
         std::process::exit(128);
-    }
-    if let Command::Status(args) = &cli.command
-        && let Err(e) =
-            short_status::require_literal(&args.paths, |p| std::path::Path::new(p).exists())
-    {
-        usage_error(&e.to_string());
     }
     if let Command::External(args) = &cli.command {
         let name = args[0].to_string_lossy();
@@ -1904,11 +1899,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Status(args) => {
             let w = in_workspace("status")?;
             let format = args.format();
-            let only = args
-                .paths
-                .iter()
-                .map(|p| w.repo_prefix(&cwd, p))
-                .collect::<Result<Vec<_>>>()?;
+            let only =
+                pathspec::parse(w, &cwd, &args.paths, Default::default(), false, usage_error)?;
             let commit = args
                 .revision
                 .map(|r| snapshot::resolve(&backend, &r))
@@ -1953,9 +1945,9 @@ fn run(cli: Cli) -> Result<()> {
                 args: &args,
                 paths: &paths,
                 cached,
+                cwd: &cwd,
             };
-            let differs =
-                diff_command(&backend, ws.as_ref(), &named, &format.format(), quiet, &rp)?;
+            let differs = diff_command(&backend, ws.as_ref(), &named, &format.format(), quiet)?;
             if differs && (exit_code || quiet) {
                 std::process::exit(1);
             }
@@ -2579,6 +2571,7 @@ struct DiffArgs<'a> {
     args: &'a [String],
     paths: &'a [String],
     cached: bool,
+    cwd: &'a std::path::Path,
 }
 
 /// Splits the leading commit references from the paths and prints the comparison; true if anything differs.
@@ -2588,12 +2581,12 @@ fn diff_command(
     named: &DiffArgs,
     format: &diff::Format,
     quiet: bool,
-    rp: &dyn Fn(&str) -> Result<String>,
 ) -> Result<bool> {
     let DiffArgs {
         args,
         paths,
         cached,
+        cwd,
     } = *named;
     let expanded = local_tags::expand_args(ws, args)?;
     let args = expanded.as_slice();
@@ -2615,12 +2608,11 @@ fn diff_command(
         }
         rest = tail;
     }
-    let only = rest
-        .iter()
-        .chain(paths)
-        .filter(|p| p.as_str() != ".")
-        .map(|p| rp(p))
-        .collect::<Result<Vec<_>>>()?;
+    let named_paths: Vec<String> = rest.iter().chain(paths).cloned().collect();
+    let spec = match ws {
+        Some(w) => pathspec::parse(w, cwd, &named_paths, Default::default(), false, usage_error)?,
+        None => pathspec::parse_from_root(&named_paths, usage_error)?,
+    };
     let ws_needed = || -> Result<&Workspace> {
         ws.context(
             "`pyn diff` with fewer than two commits compares the workspace; run it inside one",
@@ -2666,8 +2658,11 @@ fn diff_command(
         [a, b] => (snapshot_tree(a)?, snapshot_tree(b)?),
         _ => unreachable!("at most two commits are taken"),
     };
+    let (mut old, mut new) = (old, new);
+    old.retain(|p, _| spec.matches(p.as_bytes()));
+    new.retain(|p, _| spec.matches(p.as_bytes()));
     let mut out = String::new();
-    let differs = diff::compare(backend, &old, &new, &only, format, &mut out)?;
+    let differs = diff::compare(backend, &old, &new, &[], format, &mut out)?;
     if !quiet {
         print!("{out}");
         diff::exit_if_check_failed(format, &out);

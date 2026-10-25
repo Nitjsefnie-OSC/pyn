@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 
@@ -583,12 +584,12 @@ impl BudgetGateStore {
     }
 
     /// Waits until `ok` holds or 60s pass, then fails loudly instead of hanging. The contract
-    /// feature builds without tokio's time driver, so the deadline rides on the wall clock and the
+    /// feature builds without tokio's time driver, so the deadline uses a monotonic clock and the
     /// wait yields instead of sleeping.
     async fn wait_for(&self, ok: impl Fn(&Self) -> bool, what: &str) {
-        let deadline = Utc::now() + chrono::Duration::seconds(60);
+        let deadline = Instant::now() + Duration::from_secs(60);
         while !ok(self) {
-            if Utc::now() > deadline {
+            if Instant::now() >= deadline {
                 panic!("budget gate ({what}) never opened within 60s");
             }
             tokio::task::yield_now().await;

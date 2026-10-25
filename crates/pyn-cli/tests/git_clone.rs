@@ -340,10 +340,17 @@ fn wait_for_the_probe(server: &Server) {
 fn wait_for_the_probe_within(server: &Server, budget: Duration) {
     let deadline = Instant::now() + budget;
     loop {
-        if server.log().iter().any(|s| s.target == "/openapi.json") {
-            return;
-        }
         let now = Instant::now();
+        if server.log().iter().any(|s| s.target == "/openapi.json") {
+            if now < deadline {
+                return;
+            }
+            panic!(
+                "the probe's /openapi.json handling arrived only after the \
+                 {budget:?} deadline had expired: the log held {:?}",
+                server.log()
+            );
+        }
         if now >= deadline {
             panic!(
                 "the probe's /openapi.json handling did not reach the server log within the \
@@ -792,6 +799,50 @@ fn the_probe_wait_fails_within_its_deadline_when_no_probe_is_made() {
     assert!(message.contains("deadline"), "{message}");
     assert!(elapsed >= Duration::from_millis(100), "{elapsed:?}");
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+}
+
+#[test]
+fn the_probe_wait_rejects_an_entry_its_deadline_has_already_expired() {
+    use std::io::Write;
+
+    let mut t = Rig::new("sha1", Via::Http);
+    let server = t.server.take().unwrap();
+    server.clear_log();
+    let mut request =
+        std::net::TcpStream::connect(server.url.strip_prefix("http://").unwrap()).unwrap();
+    request
+        .write_all(b"GET /openapi.json HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !server.log().iter().any(|s| s.target == "/openapi.json") {
+        assert!(
+            Instant::now() < deadline,
+            "the probe request did not reach the server log: {:?}",
+            server.log()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(request);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for_the_probe_within(&server, Duration::ZERO);
+        }));
+        drop(server);
+        let _ = tx.send(result);
+    });
+    let result = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the probe wait thread did not finish within 5s");
+    let panic = result.expect_err("the probe wait must reject an entry after its deadline");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("the probe wait panic must carry a message");
+    assert!(message.contains("probe"), "{message}");
+    assert!(message.contains("arrived only after"), "{message}");
+    assert!(message.contains("deadline had expired"), "{message}");
 }
 
 #[test]

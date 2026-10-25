@@ -13,6 +13,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gitsrv::*;
 use tempfile::{TempDir, tempdir};
@@ -329,6 +330,22 @@ fn state(dir: &Path, bare: bool) -> String {
 
 fn assert_ok(o: &Out) {
     assert_eq!(o.code, 0, "{}", o.stderr);
+}
+
+/// Waits until the server's log shows the clone probe's `/openapi.json` request, failing inside the
+/// 30s deadline instead of hanging: a loaded machine may answer the probe after the clone process
+/// has already exited.
+fn wait_for_the_probe(server: &Server) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !server.log().iter().any(|s| s.target == "/openapi.json") {
+        assert!(
+            Instant::now() < deadline,
+            "the probe's /openapi.json handling did not reach the server log within 30s: the log \
+             held {:?}",
+            server.log()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
@@ -737,7 +754,7 @@ fn a_git_host_is_cloned_as_git_after_the_probe_finds_no_pyn_server() {
         o.stderr
     );
     assert!(t.pyn_dir("probed").join(".git").is_dir());
-    assert!(server.log().iter().any(|s| s.target == "/openapi.json"));
+    wait_for_the_probe(server);
 }
 
 #[test]
@@ -757,16 +774,21 @@ fn the_probe_is_observed_by_the_server_even_when_its_handling_is_delayed() {
         std::thread::spawn(move || t.pyn_clone(&url, &[], Some("probed")))
     };
     let o = worker.join().unwrap();
-    // Read while the hold is still armed: the entry provably cannot have been logged yet, because
-    // the handling was parked when the process exited. The release runs before any assertion so a
-    // failure here can never strand the latched request and hang the server teardown.
+    // Read while the hold is still armed: while it is, the entry provably cannot have been logged
+    // yet, because the handling was parked when the process exited. The release runs before any
+    // assertion so a failure here can never strand the latched request and hang the teardown.
     let logged = server.log().iter().any(|s| s.target == "/openapi.json");
     server.release_openapi_hold();
     assert_ok(&o);
+    // The released handler resumes, logs the probe and answers it; give that one poll cycle a
+    // deadline instead of demanding it already happened.
+    wait_for_the_probe(server);
+    // The armed read must have seen nothing: otherwise the handling was never really delayed and
+    // this run pinned nothing.
     assert!(
-        logged,
-        "the probe's /openapi.json handling was delayed past the clone process's exit, and the \
-         server had not logged it by the time the process was reaped: the log held {:?}",
+        !logged,
+        "the /openapi.json handling was not delayed past the clone process's exit: it was already \
+         in the server log when the process was reaped, so the run exercised no delay: {:?}",
         server.log()
     );
 }

@@ -1,0 +1,115 @@
+name: pyn 591 load probe
+
+# Fork-only supporting evidence for #591 ("pass regardless of machine load").
+# Dispatched ONCE on the exact final head SHA; never edits osc-manual.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: Git branch, tag, or 40-character commit SHA to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pyn-osc-adv-591-load-${{ github.repository }}-${{ inputs.target_ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  load:
+    name: load probe (50 iterations under CPU load)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pyn
+          POSTGRES_PASSWORD: pyn
+          POSTGRES_DB: pyn
+        ports:
+          - 5455:5432
+        options: >-
+          --health-cmd "pg_isready -U pyn"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PYN_DATABASE_URL: postgres://pyn:pyn@localhost:5455/pyn
+    steps:
+      - name: Checkout candidate ref
+        uses: actions/checkout@v7
+        with:
+          repository: Nitjsefnie-OSC/pyn
+          ref: ${{ inputs.target_ref }}
+          persist-credentials: false
+
+      - name: Report checked-out SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ ! "$checked_out_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::git rev-parse HEAD did not produce a 40-character commit SHA: $checked_out_sha"
+            exit 1
+          fi
+          printf 'checked-out SHA: %s\n' "$checked_out_sha"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Start parallel CPU load
+        run: |
+          set -euo pipefail
+          workers="$(nproc)"
+          echo "spawning $workers busy loops"
+          for i in $(seq 1 "$workers"); do
+            (while :; do :; done) &
+          done
+          jobs -p > /tmp/load-pids
+
+      - name: Iteration loop
+        run: |
+          set -euo pipefail
+          mem_pass=0; mem_fail=0
+          pg_pass=0; pg_fail=0
+          clone_pass=0; clone_fail=0
+          for i in $(seq 1 50); do
+            if cargo test -p pyn-core --test locks parallel_uploads_never_pass_the_unreferenced_budget >> /tmp/mem.log 2>&1; then
+              mem_pass=$((mem_pass+1))
+            else
+              mem_fail=$((mem_fail+1)); echo "::warning::memory iteration $i failed"; tail -n 30 /tmp/mem.log || true
+            fi
+            if cargo test -p pyn-postgres --test contract parallel_uploads_never_pass_the_unreferenced_budget -- --ignored >> /tmp/pg.log 2>&1; then
+              pg_pass=$((pg_pass+1))
+            else
+              pg_fail=$((pg_fail+1)); echo "::warning::postgres iteration $i failed"; tail -n 30 /tmp/pg.log || true
+            fi
+            if cargo test -p pyn-cli --test git_clone a_git_host_is_cloned_as_git_after_the_probe_finds_no_pyn_server >> /tmp/clone.log 2>&1; then
+              clone_pass=$((clone_pass+1))
+            else
+              clone_fail=$((clone_fail+1)); echo "::warning::clone iteration $i failed"; tail -n 30 /tmp/clone.log || true
+            fi
+          done
+          echo "memory-store test 1:  pass=$mem_pass fail=$mem_fail"
+          echo "postgres-store test 1: pass=$pg_pass fail=$pg_fail"
+          echo "clone-probe test 2:   pass=$clone_pass fail=$clone_fail"
+          if [ "$mem_fail" -ne 0 ] || [ "$pg_fail" -ne 0 ] || [ "$clone_fail" -ne 0 ]; then
+            echo "::error::some iterations failed under load"
+            exit 1
+          fi
+
+      - name: Stop CPU load
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -f /tmp/load-pids ]; then
+            while read -r pid; do kill "$pid" 2>/dev/null || true; done < /tmp/load-pids
+          fi

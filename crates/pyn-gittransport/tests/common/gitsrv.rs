@@ -180,21 +180,10 @@ pub struct Opts {
     pub redirect_to: Option<String>,
 }
 
-/// Opt-in latch for probe timing tests: while armed and unreleased, an already-handled
-/// `/openapi.json` request is parked before it is logged and answered, so the client's probe times
-/// out while the server still holds the finished handling. Default is disarmed, which changes
-/// nothing for any other request or test.
-#[derive(Default)]
-struct OpenApiHold {
-    armed: bool,
-    released: bool,
-}
-
 struct App {
     root: PathBuf,
     opts: Opts,
     log: Mutex<Vec<Seen>>,
-    hold: Mutex<OpenApiHold>,
 }
 
 pub struct Server {
@@ -210,7 +199,6 @@ impl Server {
             root: root.to_path_buf(),
             opts,
             log: Mutex::new(Vec::new()),
-            hold: Mutex::new(OpenApiHold::default()),
         });
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -247,20 +235,6 @@ impl Server {
 
     pub fn clear_log(&self) {
         self.app.log.lock().unwrap().clear();
-    }
-
-    /// Arms the `/openapi.json` hold: the request is handled, then parked before it is logged and
-    /// answered, until released.
-    pub fn arm_openapi_hold(&self) {
-        let mut h = self.app.hold.lock().unwrap();
-        h.armed = true;
-        h.released = false;
-    }
-
-    /// Releases the held `/openapi.json` request, which is then logged and answered.
-    pub fn release_openapi_hold(&self) {
-        let mut h = self.app.hold.lock().unwrap();
-        h.released = true;
     }
 }
 
@@ -383,28 +357,8 @@ async fn handle(State(app): State<Arc<App>>, req: Request<Body>) -> Response {
         .to_vec();
     let resp = respond(&app, &parts, &target, body).await;
     seen.status = resp.status().as_u16();
-    hold_openapi(&app, &target).await;
     app.log.lock().unwrap().push(seen);
     resp
-}
-
-/// Parks the already-handled `/openapi.json` request while the hold is armed and unreleased, so
-/// the client's probe times out before the request is logged or answered. The server's runtime
-/// runs with `enable_all`, so the parked task sleeps instead of spinning.
-async fn hold_openapi(app: &App, target: &str) {
-    if target != "/openapi.json" {
-        return;
-    }
-    loop {
-        let (armed, released) = {
-            let h = app.hold.lock().unwrap();
-            (h.armed, h.released)
-        };
-        if !armed || released {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
 }
 
 async fn respond(

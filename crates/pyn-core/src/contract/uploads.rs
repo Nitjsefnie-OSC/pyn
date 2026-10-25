@@ -550,6 +550,9 @@ struct BudgetGateStore {
     /// Set by the first reserve; every later reserve belongs to a competitor and is held until the
     /// first record has landed, so no competitor can reserve before the window opens.
     first_reserve: AtomicBool,
+    /// Claimed by the first `record_upload` before it forwards, so exactly one upload gates; the
+    /// done flag is set only after the forward, so the held reserves wait for the landing.
+    first_record: AtomicBool,
     /// Set once the first `record_upload` has reached the inner store.
     first_record_done: AtomicBool,
     /// Completed competitor reserve attempts (every reserve but the first).
@@ -563,6 +566,7 @@ impl BudgetGateStore {
         Arc::new(Self {
             inner,
             first_reserve: AtomicBool::new(false),
+            first_record: AtomicBool::new(false),
             first_record_done: AtomicBool::new(false),
             competitors: AtomicUsize::new(0),
             want,

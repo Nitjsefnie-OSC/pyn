@@ -280,8 +280,8 @@ pub trait MetadataStore: Send + Sync {
 
     /// Records that `repo` may reference the uploaded object `id` of `size` bytes. A new record that takes the
     /// repository's unreferenced uploads past `cap` bytes is `StorageLimitReached` and is not kept. On success the
-    /// upload's `reservation` is consumed, so its bytes stop counting as held in the same step they start counting
-    /// as unreferenced; on failure the reservation survives and stays releasable.
+    /// upload's `reservation` is consumed and its bytes stop counting as held; any newly counted unreferenced bytes
+    /// are added in the same step. On failure the reservation survives and stays releasable.
     async fn record_upload(
         &self,
         repo: &RepoId,

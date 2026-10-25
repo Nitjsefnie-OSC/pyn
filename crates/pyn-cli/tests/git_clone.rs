@@ -348,7 +348,7 @@ fn wait_for_the_probe_within(server: &Server, budget: Duration) {
                 return;
             }
             panic!(
-                "the probe's /openapi.json handling arrived only after the \
+                "the probe's /openapi.json entry was only observed after its \
                  {budget:?} deadline had expired: the log held {:?}",
                 server.log()
             );
@@ -844,7 +844,7 @@ fn the_probe_wait_rejects_an_entry_its_deadline_has_already_expired() {
         .or_else(|| panic.downcast_ref::<&str>().copied())
         .expect("the probe wait panic must carry a message");
     assert!(message.contains("probe"), "{message}");
-    assert!(message.contains("arrived only after"), "{message}");
+    assert!(message.contains("only observed after"), "{message}");
     assert!(message.contains("deadline had expired"), "{message}");
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
 }

@@ -40,7 +40,20 @@ an unknown flag on a supported command (raised by the argument parser, which nam
 Messages that git writes to standard output (for example the nothing-to-commit notice and the unmerged-path listing of a
 conflicted commit) go to standard output, and errors to standard error. `fetch`, `pull` and `push` outside any repository fail
 with `fatal: not a git repository (or any of the parent directories): .git` (`128`). The statuses are checked against git by
-`crates/pyn-cli/tests/git_exit_status.rs`, whose allow-list names the differences that remain.
+`crates/pyn-cli/tests/git_exit_status.rs`, whose allow-list names the differences that remain. Where git exits `128` for a bad
+value of an option of `log` or `show` (a missing `--since` value), and `255` for a failed
+`reflog expire` or `reflog delete`, pyn does the same.
+
+Deliberate status differences that remain:
+
+- **`checkout -B` is not built**, so `checkout -b <a> -B <b>` is a usage error (`129`) where git says the options cannot be
+  used together (`128`).
+- **An unknown option of `log`, `show` or `reflog`** is a usage error (`129`); git exits `128`. The parser cannot tell an
+  option git lacks from one pyn does not build, and the unbuilt ones are `129` by design.
+- **`status --porcelain=<version>`** takes only `v1`; `v2` is unbuilt and an unknown version such as `v9` (git: `128`) is
+  the same parser rejection, a usage error (`129`).
+- **`pyn diff` outside a repository** asks for a server (`128`); git prints its `--no-index` usage (`129`). pyn has no
+  `--no-index` form.
 
 Statuses used below:
 
@@ -67,7 +80,7 @@ The commands named in decision #218.
 | | `pyn convert [--home git\|pyn] [-y]` | pyn only | Without `--home`, adopts an existing git repository (hides `.pyn/` in `.git/info/exclude`, creates `.pyn/local_only/`, records `repo_tool = "git"`; safe to run again); outside a git repository, or in a pyn server workspace, it fails with `fatal: ...` (status 128). `--home git` in a pyn server workspace moves it to a git home keeping its history, see [Leaving a pyn server](#leaving-a-pyn-server). `--home pyn` is not built (it needs #95): it fails with `fatal: moving to a pyn server home is not built yet (#572)` (status 128) and changes nothing. |
 | `git clone <repo> [<dir>]` | `pyn clone <source> [<dir>]` | same | A source that is `<server>/owner/name` or `owner/name` on the configured server is cloned from a pyn server, and prints one summary line, not progress. A git URL (`https://`, `ssh://`, `user@host:path`) is cloned into a git repository with git's behaviour, flags and output; see [Clone from a git URL](#clone-from-a-git-url), which also says how an `http(s)` address is told apart. |
 | `git clone -b`, `--bare`, `-o`, `-n`, `--single-branch`, `--no-tags`, `-c`, `-q`, `--progress` | `pyn clone ...` | git URL: supported | Git's behaviour. On a pyn server clone they are a usage error (`129`): that clone takes everything the server has, on its default branch. |
-| `git clone --depth`, `--shallow-*`, `--filter`, `--mirror`, `--recurse-submodules`, `--sparse`, `--reference`, `--separate-git-dir`, `--template`, `--local`, `--no-hardlinks` | none | unsupported | Usage error (`129`) naming the flag: shallow, partial, mirror and submodule clones are not built, and a local-path source is refused by the transport. |
+| `git clone --depth`, `--shallow-*`, `--filter`, `--mirror`, `--recurse-submodules`, `--sparse`, `--reference`, `--separate-git-dir`, `--template`, `--local`, `--no-hardlinks` | none | unsupported | Usage error (`129`) naming the flag: shallow, partial, mirror and submodule clones are not built, and `--local`, `--no-local`, `--no-hardlinks` and `--shared` are not taken: a local-path source is cloned through the transfer protocol, see [Local paths](#local-paths-and-file-urls). |
 | `pyn clone --revision <commit>` | | pyn only | Clone as of a commit (a hash, `HEAD~N`). Git does this with `clone` then `checkout`. |
 | `pyn clone --no-local-store` | | pyn only | A pyn server clone keeps a partial local store of the history under `.pyn/local_only/store/` and commits locally by default (`--local-store` says the same); this opts out and commits straight to the server. See [the local store](workspace.md#the-local-store). A usage error for a git URL. |
 | `pyn migrate` | | pyn only | Converts a workspace made before local commits; see [migrating](workspace.md#migrating-a-workspace). |
@@ -79,7 +92,9 @@ The commands named in decision #218.
 | `git rm [-r] [-f] [-n] [-q] [--cached] [--ignore-unmatch] [--] <path>...` | `pyn rm ...` | supported | Removes tracked files from the work tree and stages the removal. On a git home it is git's `rm`, see [Removing and moving](#removing-and-moving). On a pyn server it stages a deletion for the next commit, and an exclusive path needs your lock first. |
 | `git mv [-f] [-n] [-k] [-v] <source>... <destination>` | `pyn mv ...` | supported | Renames a file or folder, or moves them into an existing folder. On a git home it is git's `mv`; on a pyn server it stages a deletion at the old path and an addition at the new one. See [Removing and moving](#removing-and-moving). |
 | `git add -p` | `pyn add -p` (`--patch`) | git home only | Asks about each hunk with git's answers, see [Choosing hunks](#choosing-hunks). On a pyn server it is a usage error (`129`): a pyn server stages whole files. |
-| `git add -i`, `-e`, `--intent-to-add`, `--chmod`, `--renormalize`, `--pathspec-from-file`, glob and magic pathspecs | none | unsupported | Usage error (`129`), or `pathspec ... did not match any files` for a glob the shell did not expand. A path is a file or a folder, taken relative to where you stand. |
+| `git add -N`, `--intent-to-add` | `pyn add -N` | git home only | Records a new file in the index with empty content and git's intent-to-add flag, so `status` shows ` A`, `diff` shows the file as new and `commit` leaves it out until it is added for real. A tracked path is left alone (a deletion is still staged by a path that names it, `.`, `-A` or `-u`, as git does). Combines with `-n`, `-v`, `-f`, `-u` and `-A`; not with `-p` (usage error, `129`). On a pyn server it is a usage error (`129`). |
+| `git add -i`, `--interactive` | `pyn add -i` | git home only | The menu of status, update, revert, add untracked, patch, diff and help, see [Interactive add](#interactive-add). On a pyn server it is a usage error (`129`); an index with unmerged paths is refused. |
+| `git add -e`, `--chmod`, `--renormalize`, `--pathspec-from-file`, glob and magic pathspecs | none | unsupported | Usage error (`129`), or `pathspec ... did not match any files` for a glob the shell did not expand. A path is a file or a folder, taken relative to where you stand. |
 | `git commit -m <msg>` | `pyn commit -m <msg>` | different | Commits what is staged as one unit of work. On a pyn server it is one changeset uploaded to the server, so commit and publish are one step (no `push` needed), it releases the locks it held, and the output is `<path> is now at revision N` for each file. On a git home it is a git commit on the current branch (or on a detached `HEAD`, which moves only `HEAD`) and prints `[<branch> <id>] <subject>`, with `detached HEAD` in place of the branch name when detached. `-m` is required (no editor) and repeats for more paragraphs. Nothing staged exits `1` with a message. |
 | `git commit -a`, `-am <msg>` | `pyn commit -a`, `-am <msg>` | same | Stages every changed tracked file, then commits; new files are not included. |
 | `git commit <path>...` | `pyn commit -m <msg> <path>...` | different | On a pyn server: one atomic commit of the named paths as they are on disk, whatever is staged (git's `--only`). Not available on a git home, which says to `add` the paths first. |
@@ -92,18 +107,25 @@ The commands named in decision #218.
 | `git log [-n <n>] [<path>]` | `pyn log [-n <n>] [<path>]` (alias `history`) | different | Without a path, newest first, 50 by default. With a path, oldest first and all revisions (git prints newest first). It lists the workspace's branch (`On branch <name>` goes to standard error). Output is a table of per-path revisions, not commit blocks. `-n` is also `--max-count`; `--limit` is an alias. On a git home it is git's output (see below). |
 | `git log --author`, `--grep`, `-i`, `--since`, `--until`, `<rev>`, `<a>..<b>`, `^<rev>`, `[<rev>...] -- <path>` | same | supported | Git's output on a git home (see [Log on a git home](#log-on-a-git-home)). On a pyn server the server filters the commits (`GET /commits` parameters, see [commits](commits.md#filtering-commits)), so the output is the commit listing of `--commits` (or the given format), never a filtered page of a longer history. The differences from git: `--author` and `--grep` are a substring, always ignoring case (`-i` is accepted and changes nothing), and a pattern with `\ [ * ^ $` is a usage error; `--author` matches the name or email of the author; `--since` and `--until` compare the author date, inclusive, and take the date forms of a git home (RFC 3339, `YYYY-MM-DD`, `2 days ago`, ...); a revision is `HEAD`, a commit hash (4 digits or more) or a [local tag](#tags) (workspaces with the local store), each optionally followed by `~N`, `^`, so branch names are not revisions there; a tag of an unpublished local commit is refused with a message (the listing is the server's history), and a path with a tag's name is a path unless `--` follows the revisions; one path only, and not with diff output (`--stat`, `-p`, ...: usage error, `129`); unpublished local commits are not listed when a filter, revision or path is given. |
 | `git log --committer`, `--invert-grep`, `--all-match`, `--no-merges`, `--merges`, `--skip`, `--reverse`, `<a>...<b>`, a repeated `--author` or `--grep`, more than one path | same | git home: supported | Git's output on a git home. On a pyn server a usage error (`129`) naming the option (`<a>...<b>` fails with `1`): the server has no committer, merge, count or symmetric filters. |
-| `git log --stat`, `--shortstat`, `--name-only`, `--name-status`, `-p`, `-U<n>` | same | supported | Both homes. The diff of each commit against its first parent follows its text, as `show` prints it (a merge shows none); `--stat` with `-p` separates them with `---`. On a pyn server they list commits like `pyn log --commits` (`-n` or 50, medium format unless a format is given) and take no `--filter` (usage error, `129`); a path or revision narrows the commits (see the filter row above); unpublished local commits are diffed from the local store. Exclusive paths show as in `show`. `--stat`, `--shortstat`, `--name-only` and `--name-status` combine with no other of the four (usage error, `129`), and `-p` with a name flag too. |
+| `git log --stat`, `--shortstat`, `--name-only`, `--name-status`, `--summary`, `-p`, `-U<n>` | same | supported | Both homes. The diff of each commit against its first parent follows its text, as `show` prints it (a merge shows none unless a merge-diff option asks, see [Merge commits in `show` and `log`](#merge-commits-in-show-and-log)); `--stat` with `-p` separates them with `---`. On a pyn server they list commits like `pyn log --commits` (`-n` or 50, medium format unless a format is given) and take no `--filter` (usage error, `129`); a path or revision narrows the commits (see the filter row above); unpublished local commits are diffed from the local store. Exclusive paths show as in `show`. `--stat`, `--shortstat`, `--name-only` and `--name-status` combine with no other of the four (usage error, `129`), and `-p` with a name flag too. |
 | `git log --oneline`, `--format=`, `--pretty=`, `--date=` | same | supported | Both homes, through one renderer (the formats and `%` placeholders of [Log on a git home](#log-on-a-git-home)). On a pyn server they list commits like `pyn log --commits` (newest first, `-n` or 50) and take no `--filter` (usage error, `129`); a path or revision narrows the commits (see the filter row above); `%d` and `%D` are empty there, as no refs are known. | |
-| `git log --graph`, `--follow`, `--decorate`, `--all`, `-S`, `-G`, `--first-parent`, `--show-signature`, `--notes`, `-E`, `-F`, `-P`, `-<n>` | none | unsupported | Usage error (`129`). Rename-aware output is #274. `pyn log` is of the workspace's branch; another branch's log needs a switch (`pyn log <branch>` is not built). |
+| `git log --all`, `--first-parent`, `--decorate[=short\|full\|auto\|no]`, `--no-decorate`, `--decorate-refs[-exclude]`, `-<n>` | same | git home: supported | Git's output on a git home (see [Log on a git home](#log-on-a-git-home)). `-<n>` is `-n <n>`. On a pyn server a usage error (`129`) naming the option. |
+| `git log --follow`, `-S<string>`, `-G<regex>` | same | git home: supported | Git's output on a git home (see [Log on a git home](#log-on-a-git-home)); `--follow` takes no diff output. On a pyn server a usage error (`129`). |
+| `git log -E`, `-F`, `--basic-regexp` | same | git home: supported | The pattern syntax of `--grep`, `--author` and `--committer`; the last of the switches wins. On a pyn server a usage error (`129`). |
+| `git log -P` | none | unsupported | Usage error (`129`): pyn has no Perl-compatible regular expression engine, and `-E` covers extended expressions. |
+| `git log --graph` | same | git home: supported | Git's output on a git home, in git's topological order (see [Log on a git home](#log-on-a-git-home)); no path, diff output or commit filters. On a pyn server a usage error (`129`). |
+| `git log --show-signature`, `--notes` | none | unsupported | Usage error (`129`). `pyn log` is of the workspace's branch; another branch's log needs a switch (`pyn log <branch>` is not built). |
 | `pyn log --commits` | | pyn only | List commits (`COMMIT`, `AUTHOR`, `WHEN`, `FILES`, `MESSAGE`) instead of revisions. |
 | `pyn log --filter <glob>` | | pyn only | Only paths matching the glob. |
 | `git diff [<c1> [<c2>]] [-- <path>...]` | `pyn diff [<c1> [<c2>]] [-- <path>...]` | different | Unified output as git, computed in the CLI. Commits are hashes (or abbreviations of 4 or more digits), `HEAD`, `~N`, `^`, or `a..b`; two commits work outside a workspace. With no commit it compares the work tree with the index: the staged content, or the last update for what is not staged. File modes print as in git, including `old mode` and `new mode`. On a git home an argument that is neither a revision nor an existing path (a deleted file needs `--`) fails with `fatal: ambiguous argument '<arg>'` (or `bad revision` before `--`), exit `128`, as git does; `a...b` is not supported and fails the same way. |
-| `git diff -U<n>`, `--unified=<n>`, `--stat`, `--name-only`, `--name-status`, `--exit-code`, `-q` | same | same | `--name-status` prints `A`, `M`, and `D`; gitlink type changes print `T`. |
+| `git diff -U<n>`, `--unified=<n>`, `--stat`, `--name-only`, `--name-status`, `--exit-code`, `-q` | same | same | `--name-status` prints `A`, `M`, and `D`; gitlink type changes print `T`, and on a git home a rename or copy prints `R<nn>` or `C<nn>` (see [Rename and copy detection](#rename-and-copy-detection)). On a git home `--stat` (also in `show`, `log` and `stash show`) prints a binary file as git does, `Bin <old> -> <new> bytes` (`Bin` alone for a rename with identical content, as in the merge diffstat), aligned in the graph column and left out of the insertion and deletion totals; `--numstat` prints `-` and `-`. |
 | `git diff --numstat` | same | different | Both homes. Prints added and deleted line counts per path, or `-` and `-` for a binary file. It combines with none of `--stat`, `--shortstat`, `--name-only`, `--name-status` or `--check` (usage error, `129`); git can combine numeric and other stats or give another format precedence. |
 | `git diff --cached`, `--staged` | `pyn diff --cached`, `--staged` | different | The staged content against the last commit (the last update on a pyn server). On a git home it takes one optional commit to compare with, as git; on a pyn server it takes none. |
 | `git diff --shortstat`, `-w` (`--ignore-all-space`), `--check` | same | same | Both homes. `--shortstat` prints only the totals line. `-w` compares lines with all whitespace removed, prints context lines as they are in the new file, and leaves out a file that differs only in whitespace (so `--exit-code` is `0` when nothing else changed); `--name-only` and `--name-status` still list it, as git 2.43 does (newer git versions differ on this edge; pyn lists the file). `--check` prints `path:line: trailing whitespace.` (or `space before tab in indent.`, or both) and the added line, then `path:line: new blank line at EOF.`, for git's default whitespace rules, and exits `2` if it printed anything; `-w` does not affect it (newer git versions differ here too). `--check` and `--shortstat` combine with no other format (`--stat`, `--name-only`, `--name-status`): a usage error (`129`), where git prints both stats or refuses with `128`. |
-| `git diff --word-diff`, `--color`, `--no-index`, `-M`, `-C` | none | unsupported | Usage error (`129`). |
-| `git show [<commit>]` | `pyn show [<commit>]` | different | Commit header (`commit`, `Author:`, `Date:`), message, then the commit's diff. The newest commit if none is named. The author line carries the email. On a git home the output is git's, except for merge commits (see below). |
+| `git diff --word-diff`, `--color`, `--no-index` | none | unsupported | Usage error (`129`). |
+| `git diff -M[<n>]`, `--find-renames[=<n>]`, `-C[<n>]`, `--find-copies[=<n>]`, `--no-renames`, `-l<n>`, `--summary` | same | git home: supported | Rename and copy detection and the `--summary` lines, as git does them; also in `show`, `log` and `stash show`. See [Rename and copy detection](#rename-and-copy-detection). `-C -C` and `--find-copies-harder` are a usage error (`129`). |
+| `git show [<commit>...] [-- <path>...]` | `pyn show [<commit>...] [-- <path>...]` | different | Commit header (`commit`, `Author:`, `Date:`), message, then the commit's diff. The newest commit if none is named. The author line carries the email. On a git home the output is git's, with a merge commit shown as a combined diff (see [Merge commits in `show` and `log`](#merge-commits-in-show-and-log)): it takes several commits, and paths (after `--`, or existing ones) limit each diff. A commit that changes none of the paths still prints its header, as git 2.55 does (older git leaves it out). A pyn server takes one commit and no paths (usage error, `129`). |
+| `git show`, `git log` with `-m`, `-c`, `--cc`, `--dd`, `--first-parent`, `--diff-merges=<mode>`, `--no-diff-merges`, and `log.diffMerges` | same | git home: supported | A merge's combined (`-c`), dense combined (`--cc`, the default of `show`), per-parent (`-m`) and first-parent diffs, byte for byte as git prints them. `--remerge-diff` and `--combined-all-paths` are not built. See [Merge commits in `show` and `log`](#merge-commits-in-show-and-log). A pyn server refuses them (`129`). |
 | `git show -U<n>`, `--stat`, `--shortstat`, `-w`, `--check`, `--name-only`, `--name-status` | same | same | The diff flags behave as on `diff`, and `--stat` is laid out as git lays it out at 80 columns (long names cut with `...`, graph scaled); `--check` exits `2` when it reports a problem. |
 | `git show --numstat` | same | different | The numeric rows and format-combination limits are the same as `diff --numstat`. |
 | `git show <rev>:<path>` | `pyn get <path> [--rev N] [-o <file>]` | different | `show` takes commits only (`HEAD:foo` fails with `fatal: ... is not a commit`, `128`). File content at a revision is `pyn get`, to stdout or a file. `--rev` is a per-path revision, not a commit. |
@@ -115,6 +137,7 @@ The commands named in decision #218.
 | `git restore [-s <rev>] [-S] [-W] <path>...` (the work tree) | `pyn restore ...` on a git home | git home only | Takes the paths from the index (or `--source`) into the work tree, and with `--staged --worktree` into both. See [Branches, switching and the work tree](#branches-switching-and-the-work-tree). On a pyn server `--worktree` is a usage error (`129`): a restore there makes an older revision the new head. |
 | `git restore --ours\|--theirs [-W] <path>...` | `pyn restore --ours\|--theirs <path>...` | git home only | Writes one side of an unmerged path into the work tree and leaves the path unmerged. On a pyn server it is a usage error (`129`). See [`restore`](#branches-switching-and-the-work-tree). |
 | `git restore --merge <path>...` | `pyn restore --merge <path>...` | git home only | Recreates the conflicted merge of an unmerged path in the work tree, with diff3 markers. `--merge` has no `-m` short form (that is `--message`), and `--conflict=<style>` is not accepted. |
+| `git checkout -p [<tree-ish>] [--] [<path>...]`, `git reset -p [<tree-ish>] [--] [<path>...]` | `pyn checkout -p`, `pyn reset -p` | git home only | The prompt of `restore -p`, see [Choosing hunks](#choosing-hunks): `checkout -p` discards from the work tree (index to work tree) or, with a tree-ish, from the index and the work tree (`Discard` for `HEAD`, `Apply` for anything else); `reset -p` unstages (`Unstage`, or `Apply ... to index` for a tree-ish other than `HEAD`) and works on an unborn branch. `reset -p` with `--soft`, `--mixed`, `--hard`, `--keep` or `--merge` is `fatal` (`128`); `checkout -p` with `-b`, `-f`, `--detach`, `--ours`, `--theirs` or `--yes` is a usage error (`129`). On a pyn server both are usage errors. |
 | `git restore -p` | `pyn restore -p` (`--patch`) | git home only | Asks about each hunk of the work tree, the index (`--staged`) or both, from the index, `HEAD` or `--source`, see [Choosing hunks](#choosing-hunks). On a pyn server it is a usage error (`129`). |
 | `git reset [--soft\|--mixed\|--hard\|--keep\|--merge] [-q] [<rev>]`, `git reset [<rev>] [--] <path>...` | `pyn reset ...` | git home: supported; pyn server: different | On a git home it is git's reset, see [Reset](#reset). On a pyn server `pyn reset [--soft\|--mixed\|--hard] [<commit>]` only drops unpublished local commits ([workspace](workspace.md#the-local-store)); `--keep`, `--merge`, `-q`, paths and a second revision are a usage error there. |
 | `git branch`, `git switch`, `git checkout` | `pyn branch`, `pyn switch`, `pyn checkout` | supported | See [branching and merging](#branching-and-merging). On a git home they work on `.git` as git does, see [Branches, switching and the work tree](#branches-switching-and-the-work-tree). |
@@ -137,16 +160,20 @@ Commands people reach for that are not in the daily set.
 
 | Git | pyn | Status | Notes |
 | --- | --- | --- | --- |
-| `git ls-files` | `pyn files` | different | Table of every file with mode, head revision and lock holder. No flags. On a git home it lists the index, every file `shared`, with no revision or lock. |
-| `git ls-tree [<rev>] [<path>]` | `pyn ls [<path>]` | different | One folder with each entry's mode, last change and lock. Head only; no revision argument. On a git home it lists `HEAD`'s tree, with no last change. |
-| `git cat-file -p`, `git show <rev>:<path>` | `pyn get <path>` | different | See `show` above. |
+| `git ls-files` | `pyn files` | different | Table of every file with mode, head revision and lock holder. No flags. On a git home `pyn files` lists the index, every file `shared`, with no revision or lock, and `pyn ls-files` is git's command; see [Inspection commands](#inspection-commands). |
+| `git ls-tree [<rev>] [<path>]` | `pyn ls [<path>]` | different | One folder with each entry's mode, last change and lock. Head only; no revision argument. On a git home `pyn ls` lists `HEAD`'s tree, with no last change, and `pyn ls-tree` is git's command; see [Inspection commands](#inspection-commands). |
+| `git cat-file`, `git show <rev>:<path>` | `pyn get <path>` | different | See `show` above. On a git home `pyn cat-file` is git's command; see [Inspection commands](#inspection-commands). |
+| `git rev-parse`, `git show-ref`, `git shortlog`, `git describe`, `git name-rev` | the same names on a git home | git home only | See [Inspection commands](#inspection-commands). On a pyn server they fail with `fatal: not a git repository (or any of the parent directories): .git` (`128`). |
 | `git config --list`, `--get <key>`, `<key> <value>` | `pyn config list`, `get`, `set` | different | Subcommands instead of flags. `--global` and `--local` are accepted where they apply (`set` takes `--global` only; the default is the workspace). Keys are pyn's own. `pyn config init` is pyn only: it prompts for the user settings. |
 | `git config --unset`, `-e`, `--system`, `--file` | none | unsupported | Usage error (`129`). |
 | `git fsck` | `pyn verify [<path>]` | different | Checks every revision's hash and its link to the one before, and the audit log's chain. Silent and exit 0 when intact, as git; otherwise a `PROBLEM`, `WHAT`, `PATH` table and exit 1. `-v` / `--verbose` also prints what was checked. See [integrity](integrity.md). |
 | `git reflog [show\|list\|exists\|expire\|delete]` | `pyn reflog ...` on a git home | git home only | See [Reflogs](#reflogs). On a pyn server it prints the git-command message; the closest analogue there is `pyn audit`, an append-only log of lock, revision and access events, filtered with `--path`, `--actor`, `--action`, `--before`, `--limit` and permission-gated (`view_audit`). |
-| `git blame`, `git annotate` | none | unsupported | Git-command message. Line history needs merge-capable text history; not scheduled. |
+| `git grep [<options>] [-e] <pattern> [<rev>...] [[--] <path>...]` | `pyn grep ...` on a git home | git home only | See [Grep](#grep). Searches the tracked files of the work tree, the index (`--cached`) or the commits named; `-n -i -w -l -c -v -q -h -H -a -I -E -G -F`, `-e` (repeatable), `--and`, `--or`, `--not` and parentheses, pathspecs after the revisions or `--`. On a pyn server or local-store workspace it says it needs a git repository (`1`). |
+| `git bisect start [--term-(bad\|new)=<term> --term-(good\|old)=<term>] [--no-checkout] [--first-parent] [<bad> [<good>...]] [--] [<pathspec>...]`, `good`\|`old`, `bad`\|`new`, `skip`, `next`, `reset`, `run`, `log`, `replay`, `terms` | `pyn bisect ...` on a git home | git home only | See [Bisect](#bisect). Git's search, output, exit statuses and `.git` state, so git and pyn can continue each other's bisection; `visualize` and `view` are not built (`129`). On a pyn server or local-store workspace it fails with `fatal: not a git repository (or any of the parent directories): .git` (`128`). |
+| `git blame [-L <range>] [-w] [<options>] [<rev>] [--] <file>`, `git annotate` | `pyn blame ...`, `pyn annotate ...` on a git home | git home only | See [Blame](#blame). Git's lines byte for byte: the default, `-e`, `-s`, `-f`, `-n`, `-l`, `-t`, `-b`, `--root`, `--abbrev`, `--date`, `-p`, `--line-porcelain`, `-L` ranges, `<rev>`, `<a>..<b>` and `^<rev>`. `-M`, `-C` and `--incremental` are usage errors (`129`). On a pyn server or local-store workspace it says it needs a git repository (`1`). |
 | `git submodule` | none | unsupported | Submodule lifecycle commands are not built. On a git home, `status` and `diff` inspect recorded gitlinks and initialized submodule checkouts without changing them; see [On a git home](#on-a-git-home). |
-| `git shortlog`, `git describe`, `git rev-parse`, `git archive`, `git bundle`, `git format-patch`, `git am`, `git apply`, `git notes`, `git bisect`, `git worktree`, `git gc`, `git fsck` | none | unsupported | `pyn: '<cmd>' is not a pyn command` (`1`). Only the commands in the git-only list print the "git command pyn does not support yet" message, so these read as unknown until that list is widened (#223). |
+| `git format-patch`, `git apply`, `git am` | the same names on a git home | git home only | See [Patches](#patches). On a pyn server `format-patch` and `am` fail with `fatal: not a git repository (or any of the parent directories): .git` (`128`), as does `apply`, which git would run outside a repository too. |
+| `git archive`, `git bundle`, `git notes`, `git worktree`, `git gc`, `git fsck` | none | unsupported | `pyn: '<cmd>' is not a pyn command` (`1`). Only the commands in the git-only list print the "git command pyn does not support yet" message, so these read as unknown until that list is widened (#223). |
 
 ## Branching and merging
 
@@ -159,10 +186,10 @@ revisions with a pointer per branch (decision #299).
 | `git branch [<name> [<start>]]`, `-d`, `-D`, `-m`, `-l`, `-v`, `--show-current` | `pyn branch ...` | supported | `-d` refuses a branch that is not on the default branch (git: not merged into `HEAD`). `-a` and `-r` list the server as the remote `origin` (see [Remotes on a pyn server](#remotes-on-a-pyn-server)); `-M`, `-c`, `-C`, `-f`, `-u`, `--unset-upstream` and patterns are not built on a pyn server (usage errors); a git home has them (see below). The workspace's branch cannot be deleted. |
 | `git switch <branch>`, `-c <new> [<start>]`, `-f` | `pyn switch ...` | supported | Local changes carry over where the target branch has the same file, and stop the switch (nothing changed, the paths listed) where it does not; `-f` discards them. On a pyn server `-`, `--detach` and `-C` are not built; a git home has `-`, `--detach`, `-C` and `--orphan` (see below). Prints `Switched to branch '<name>'` on standard error, as git. |
 | `git checkout <branch>`, `-b <new> [<start>]`, `-f`, `[<tree-ish>] -- <path>...` | `pyn checkout ...` | supported | Reserved for git's meaning. `-- <path>` restores from the revision the workspace has (git: the index; a staged path must be unstaged first), `<branch\|commit> -- <path>` from that branch or commit. On a pyn server a path that is `exclusive` and has a local edit (locked by you or not) is not discarded silently: the files are named and the discard needs the path typed back or `--yes`, and a run without a terminal refuses (`128`, nothing changed); `shared` paths discard silently as in git. On a pyn server there is no detached HEAD: `checkout <commit>` is refused with what to use instead. Taking a lock is `pyn lock`. |
-| `git merge <branch\|commit>`, `-m`, `--no-ff`, `--ff-only`, `--no-commit`, `--abort`, `--continue`, `--stat`, `-n`/`--no-stat` | `pyn merge ...` | supported | Shared files merge three-way with diff3 conflict markers; a binary conflicts as a whole file. Exclusive files take the pointer that descends from the other, and conflict where both branches changed one or a path became exclusive while a branch edited it (a person chooses a side, taking the lock). A conflicted merge leaves the workspace as git does and is concluded with `pyn add` and `pyn commit` (no `-m` needed), or given up with `--abort`. Differences: `--preview` (pyn's own) reports what would merge and conflict and changes nothing; a merge needs a clean index and no local edits to the files it touches; `--squash`, `--no-verify`, `--edit`, `--signoff`, `-S` and `--ff` are usage errors, and so are `-s` and `-X` (they need a git repository; see [Merging](#merging)). `git checkout --ours` and `--theirs` are `pyn checkout --ours\|--theirs -- <path>`. `pyn status` marks unmerged paths in its `STATE` column. Recursive merge of criss-cross histories as git does, with the base of a conflict shown as `merged common ancestors`. |
-| `git cherry-pick <commit>...`, ranges, `-n`, `-x`, `-s`, `-m <n>`, `--continue`, `--skip`, `--abort`, `--quit` | `pyn cherry-pick ...` | supported | Each commit's change becomes a new commit, with its author and message. On a git home see [Cherry-pick](#cherry-pick). On a pyn server workspace with local commits the commits, ranges and `-x` work, and `-n`, `-s`, `-m` and `--quit` are refused; see [cherry-pick in commits](commits.md#cherry-pick). A pyn server workspace without local commits refuses the command. |
-| `git revert <commit>...`, ranges, `-n`, `-s`, `-m <n>`, `--no-edit`, `--continue`, `--skip`, `--abort`, `--quit` | `pyn revert ...` | supported | Each commit's change is undone by a new commit (`Revert "<subject>"`). On a git home see [Revert](#revert). On a pyn server workspace with local commits the commits and ranges work, and `-n`, `-s`, `-m` and `--quit` are refused; see [revert in commits](commits.md#revert). A pyn server workspace without local commits refuses the command. |
-| `git rebase [--onto <newbase>] [<upstream> [<branch>]]`, `--continue`, `--skip`, `--abort`, `--quit`, `--autostash`, `--no-ff` | `pyn rebase ...` | supported (git home) | Replays the commits after the upstream one by one onto the new base, with the same ids as git. See [Rebase](#rebase), including `--rebase-merges`, `--root`, `--update-refs` and the fork point. A pyn server workspace with a local store rebases only its unpublished local commits, interactively too (`edit`, `exec`, `break`, `--exec`, `--edit-todo`, `--autostash`, `--no-ff`, `--quit` and `<branch>` work), and refuses a range with a published one, `--rebase-merges`, `--root`, `--fork-point` and `--update-refs` ([commits](commits.md#rebase)); without a local store it refuses the command. |
+| `git merge <branch\|commit>`, `-m`, `--no-ff`, `--ff-only`, `--no-commit`, `--abort`, `--continue`, `--stat`, `-n`/`--no-stat` | `pyn merge ...` | supported | Shared files merge three-way with diff3 conflict markers; a binary conflicts as a whole file. Exclusive files take the pointer that descends from the other, and conflict where both branches changed one or a path became exclusive while a branch edited it (a person chooses a side, taking the lock). A conflicted merge leaves the workspace as git does and is concluded with `pyn add` and `pyn commit` (no `-m` needed), or given up with `--abort`. Differences: `--preview` (pyn's own) reports what would merge and conflict and changes nothing; a merge needs a clean index and no local edits to the files it touches; `--squash`, `--no-verify`, `--edit`, `--signoff` and `--ff` are usage errors, and so are `-s`, `-X`, `-S` and `--no-gpg-sign` (they need a git repository; see [Merging](#merging) and [Signing](#signing)). `git checkout --ours` and `--theirs` are `pyn checkout --ours\|--theirs -- <path>`. `pyn status` marks unmerged paths in its `STATE` column. Recursive merge of criss-cross histories as git does, with the base of a conflict shown as `merged common ancestors`. |
+| `git cherry-pick <commit>...`, ranges, `-n`, `-x`, `-s`, `-S[<keyid>]`, `--no-gpg-sign`, `-m <n>`, `--continue`, `--skip`, `--abort`, `--quit` | `pyn cherry-pick ...` | supported | Each commit's change becomes a new commit, with its author and message. On a git home see [Cherry-pick](#cherry-pick). On a pyn server workspace with local commits the commits, ranges and `-x` work, and `-n`, `-s`, `-S`, `--no-gpg-sign`, `-m` and `--quit` are refused; see [cherry-pick in commits](commits.md#cherry-pick). A pyn server workspace without local commits refuses the command. |
+| `git revert <commit>...`, ranges, `-n`, `-s`, `-S[<keyid>]`, `--no-gpg-sign`, `-m <n>`, `--no-edit`, `--continue`, `--skip`, `--abort`, `--quit` | `pyn revert ...` | supported | Each commit's change is undone by a new commit (`Revert "<subject>"`). On a git home see [Revert](#revert). On a pyn server workspace with local commits the commits and ranges work, and `-n`, `-s`, `-S`, `--no-gpg-sign`, `-m` and `--quit` are refused; see [revert in commits](commits.md#revert). A pyn server workspace without local commits refuses the command. |
+| `git rebase [--onto <newbase>] [<upstream> [<branch>]]`, `--continue`, `--skip`, `--abort`, `--quit`, `--autostash`, `--no-ff`, `-S[<keyid>]`, `--no-gpg-sign` | `pyn rebase ...` | supported (git home) | Replays the commits after the upstream one by one onto the new base, with the same ids as git. See [Rebase](#rebase), including `--rebase-merges`, `--root`, `--update-refs` and the fork point. A pyn server workspace with a local store rebases only its unpublished local commits, interactively too (`edit`, `exec`, `break`, `--exec`, `--edit-todo`, `--autostash`, `--no-ff`, `--quit` and `<branch>` work), and refuses a range with a published one, `--rebase-merges`, `--root`, `--fork-point` and `--update-refs` ([commits](commits.md#rebase)); without a local store it refuses the command. |
 
 ## Remotes
 
@@ -307,7 +334,7 @@ server sha256` (`128`). A repository with no objects, refs or index takes the re
 
 Differences from git, all deliberate or not yet done: `--dry-run` downloads objects like git does, but git lists auto-followed tags twice on a dry run and pyn once;
 ids are not lengthened to stay unique and do not scale with the repository's size; there is no per-object "Receiving objects" progress,
-only what the server sends; local-path and `file://` remotes are refused (see [Transports and credentials](#transports-and-credentials));
+only what the server sends;
 `fetch.output`, `fetch.showForcedUpdates`, `fetch.recurseSubmodules`, `fetch.writeCommitGraph`, `remote.<name>.promisor`,
 `--refmap`, `--negotiation-tip`, `--server-option`, `--stdin` and `-4`/`-6` are not read or taken; `--all` runs
 the remotes one at a time whatever `-j` or `fetch.parallel` say, so `FETCH_HEAD` lists them in configuration order; the stale-ref hint after a ref could
@@ -367,7 +394,8 @@ that cannot fast-forward is `fatal: Not possible to fast-forward, aborting.` (`1
 | `--no-edit` | Accepted: no editor is ever started. |
 | `--no-rebase`, `--rebase`, `-r`, `--autostash` | `--no-rebase` merges; `--rebase` fast-forwards or replays as above; `--autostash` stashes before a rebase and applies after (a usage error unless the pull rebases). |
 | `-s`, `--strategy`, `-X`, `--strategy-option` | Passed to the merge as for `pyn merge`, see [Strategies and options](#strategies-and-options). A strategy name git does not define is `Could not find merge strategy '<name>'.` (`1`); more than one `-s`, and `-X` options pyn cannot honor, are usage errors (`129`), as are `-s` and `-X` with a pull that rebases (git hands them to its rebase; pyn's rebase has no strategies yet). |
-| `--edit`, `-e`, `--squash`, `-S`/`--gpg-sign`, `--signoff`, `--cleanup`, `--recurse-submodules`, `--allow-unrelated-histories`, `--all` | Usage error (`129`): not built (`--all`: use `pyn fetch --all`). |
+| `-S[<keyid>]`, `--gpg-sign[=<keyid>]`, `--no-gpg-sign` | Passed on: the merge commit of a merge pull, or each commit a rebasing pull makes, is signed as for `pyn merge` and `pyn rebase`, see [Signing](#signing). |
+| `--edit`, `-e`, `--squash`, `--signoff`, `--cleanup`, `--recurse-submodules`, `--allow-unrelated-histories`, `--all` | Usage error (`129`): not built (`--all`: use `pyn fetch --all`). |
 
 Config read: `pull.ff`, `pull.rebase`, `branch.<name>.rebase`, `branch.<name>.merge`, `branch.<name>.remote`, `merge.ff`, plus what
 `pyn fetch` reads, plus `merge.stat`. `pull.twohead`, `pull.octopus` and `branch.<name>.mergeOptions` are not read. The message of an annotated tag
@@ -381,7 +409,7 @@ is not appended to a tag merge's message. Pulling on a pyn server is #310 and st
 nothing but errors with `-q`. A failure is `fatal: ...` with exit `128`; an unsupported flag is a usage error (`129`).
 
 **Which sources are git.** `ssh://`, `git+ssh://`, `ssh+git://`, scp-like `[user@]host:path`, and any other URL scheme or local path
-(refused with the transport's `local-path remotes are not supported yet`) are always git. A bare `owner/name` is a pyn server
+(served in process, see [Local paths](#local-paths-and-file-urls)) are always git; a relative name such as `repo` is a local path only when that folder is a git repository, else it is read as `owner/name`. A bare `owner/name` is a pyn server
 repository on the configured server, and `<server>/owner/name` over `http(s)` is a pyn server when the server says so. For an
 `http(s)` address whose last two path segments could be `owner/name`, pyn asks the part in front of them for
 `/openapi.json`, without credentials and within three seconds, and calls it a pyn server only when the answer is a JSON document
@@ -506,7 +534,7 @@ What a push does, in git's order:
 Differences from git, all deliberate or not yet done: no per-object "Enumerating objects" or "Writing objects" progress, only what the
 server sends; ids are not lengthened to stay unique; `push.autoSetupRemote`, `push.negotiate`, `push.gpgSign`, `push.recurseSubmodules`,
 `push.useForceIfIncludes` and `remote.<name>.receivepack` are not read; pre-push hooks are never run; `--dry-run` with `-u` prints `Would set upstream of ...`
-instead of setting anything; local-path and `file://` remotes are refused (see [Transports and credentials](#transports-and-credentials)).
+instead of setting anything.
 A push to a pyn server is not this command: see the push row above.
 
 ### Text from a remote
@@ -530,8 +558,8 @@ streamed pack file on push) are what those commands call.
 Tests use real git as the oracle server (tests only, never at runtime): `crates/pyn-gittransport/tests/common/gitsrv.rs` holds
 the shared fixtures (bare repositories, the `GIT_SSH_COMMAND` shim, `git http-backend` behind a test HTTP server), and
 `crates/pyn-cli/tests/git_remote_matrix.rs` runs `ls-remote`, `clone`, `fetch`, `pull` and `push` over ssh, HTTP, HTTP with
-credentials, a local path and a `file://` URL, each for SHA-1 and SHA-256 repositories. The last two are not supported yet, so the matrix
-asserts that refusal. The per-command suites (`git_clone.rs`, `git_fetch.rs`, `git_pull.rs`, `git_push.rs`) go deeper on one command.
+credentials, a local path and a `file://` URL, each for SHA-1 and SHA-256 repositories. The per-command suites (`git_clone.rs`, `git_fetch.rs`, `git_pull.rs`, `git_push.rs`) go deeper on one command and also run against a local path and a `file://` URL, so
+those are compared with real git without a server or an ssh shim; `git_local_remote.rs` covers what only a local repository can do.
 
 ### URLs
 
@@ -540,12 +568,32 @@ asserts that refusal. The per-command suites (`git_clone.rs`, `git_fetch.rs`, `g
 | `https://host/path`, `http://host/path` | Smart HTTP |
 | `ssh://[user@]host[:port]/path`, `git+ssh://...`, `ssh+git://...` | System `ssh` |
 | `[user@]host:path` (scp-like; `[::1]:path` for IPv6) | System `ssh` |
-| `/path`, `./path`, `file:///path` | Not supported: `local-path remotes are not supported yet` (serving a local repository needs git itself) |
+| `/path`, `./path`, `file:///path` | Served in process, see [Local paths and `file://` URLs](#local-paths-and-file-urls) |
 | `git://host/path` | Not supported: unauthenticated and unencrypted |
 
 `url.<base>.insteadOf` and `pushInsteadOf` (longest matching prefix wins; `pushInsteadOf` first when pushing) are applied when
 connecting, so `remote -v` still shows what is configured. A password or token in a URL is never printed: messages show the URL
 without its user information, and error text from the network layer is redacted the same way.
+
+### Local paths and `file://` URLs
+
+A remote that is a directory on this machine is served by pyn itself, in process: the same upload-pack (protocol v2 `ls-refs` and
+`fetch`) and receive-pack (`report-status`, `delete-refs`, `atomic`, `side-band-64k`) exchanges a network remote speaks, answered
+from the repository's objects and refs. No `git` program, no child process and no hidden command are involved, so the only
+path ever opened is the one the remote names. It must be a git directory or a work tree root (`<path>.git` is tried too), and its
+object store must be readable, else `fatal: '<path>' does not appear to be a git repository` (`128`). `file://` takes an empty host
+or `localhost`; the path is percent-decoded. `clone` records a relative path as an absolute one, as git does.
+
+On a push the served repository decides like `git receive-pack`, with the same refusals and wording: updating or deleting the checked-out
+branch of a non-bare repository is refused (`receive.denyCurrentBranch`: `refuse` by default, `ignore`, `warn`), deleting the current branch
+of any repository is refused (`receive.denyDeleteCurrent`), and `receive.denyDeletes` and `receive.denyNonFastForwards` are honoured. A new
+tip must be connected to objects the repository holds. Configuration is the user's global files under the repository's own.
+
+Refused cleanly, because they need machinery pyn does not run: a repository with an executable `pre-receive`, `update`, `post-receive`,
+`post-update`, `push-to-checkout` or `reference-transaction` hook, `receive.fsckObjects` or `transfer.fsckObjects`, any `hideRefs`
+setting, and `receive.denyCurrentBranch=updateInstead`. Not done: the served repository gets no reflog entries from a push, a branch
+checked out in a linked worktree is not protected, packs are sent without deltas, and the objects of a rejected push stay in the
+repository unreferenced (there is no quarantine).
 
 ### ssh
 
@@ -667,7 +715,6 @@ schedules them.
 
 | Git | Reason |
 | --- | --- |
-| `git blame`, `git grep` | Not scheduled. |
 | Commands that maintain git's own storage or run its hooks (`gc`, `fsck`, `bundle`, `submodule`, `worktree`, hooks in `.git/hooks`) | pyn reads a git repository's `.git/` on a git home (decision #245) but does not maintain it or run its hooks. pyn's own hooks are tracked in #216. |
 
 ## On a git home
@@ -739,8 +786,11 @@ whatever the rules say.
 | --- | --- |
 | `status` | Also `-s`, `--porcelain` and `-b` in git's short format, and pathspecs (see [the short format](#the-short-status-format)). Header (`On branch main`, or `HEAD detached at <id>`), a `STAGED`, `UNSTAGED`, `PATH` table, and a count line; `nothing to commit, working tree clean` when clean. States are `added`, `modified`, `deleted`, `typechange`, `untracked` and `unmerged`. Staged is `HEAD` against the index, unstaged is the index against the work tree, so a path can be in both. A folder with nothing tracked in it is listed once, as `dir/`. Paths are from the repository root. Mode changes count as modified; symlinks are compared by their target. |
 | `diff` | Index against the work tree; one commit against the work tree (the paths in the commit or the index); two commits, or `a..b`. A name that is both a revision and a file needs `--`. Shows `old mode` and `new mode`, symlinks and binary files as git does. `--cached` and `--staged` compare the index with `HEAD` (or with one named commit). |
-| `show [<rev>]` | Commit header and message, then the diff against the first parent. A merge commit prints no diff (git prints a combined diff, which pyn does not compute). |
+| `show [<rev>]` | Commit header and message, then the diff against the first parent; a merge commit prints git's dense combined diff (see [Merge commits in `show` and `log`](#merge-commits-in-show-and-log)). |
 | `log [<options>] [<rev>...] [--] [<path>...]` | Git's output: commit blocks, newest first across all parents, with git's history simplification for a path; revision ranges, formats, filters and diff output are in [Log on a git home](#log-on-a-git-home). `--commits` is the pyn table. `--filter` fails. |
+| `grep [<options>] [-e] <pattern> [<rev>...] [[--] <path>...]` | git's output over the work tree, the index (`--cached`) or revisions; see [Grep](#grep). |
+| `bisect <subcommand>` | git's binary search, output and state; see [Bisect](#bisect). |
+| `blame`, `annotate` | git's output for the line history of a file, following renames and merges; see [Blame](#blame). |
 | `files`, `ls` | `files` lists the index and `ls` lists `HEAD`'s tree. Every entry is `shared`, with no revision, lock or last change. |
 | `add`, `restore --staged`, `commit` | See [staging](#staging-and-committing). |
 | `rm`, `mv` | See [Removing and moving](#removing-and-moving). |
@@ -752,6 +802,8 @@ whatever the rules say.
 | `stash` | See [Stashing](#stashing). |
 | `clean` | See [Clean](#clean). |
 | `reflog` | See [Reflogs](#reflogs). |
+| `rev-parse`, `ls-files`, `ls-tree`, `cat-file`, `show-ref`, `shortlog`, `describe`, `name-rev` | See [Inspection commands](#inspection-commands). |
+| `format-patch`, `apply`, `am` | See [Patches](#patches). |
 | `init` | See above. `pyn init` starts a pyn repository; `pyn init-git` starts a git one. |
 | `login`, `logout`, `register`, `password`, `key`, `token`, `user`, `org`, `team`, `repo`, `usage`, `setup`, `admin`, `whoami`, `member`, `role`, `invite` | Run as anywhere else; see [Refused commands](#refused-commands). |
 | `lock`, `unlock`, `locks`, `policy`, `audit`, `verify`, `summary` | Refuse; see [Refused commands](#refused-commands). |
@@ -781,9 +833,7 @@ Differences from git, all deliberate or not yet done:
 
 - Files are read as they are on disk: `core.autocrlf`, `.gitattributes` filters and `core.eol` are not applied, so a
   repository that depends on them can show files as modified that git does not.
-- No rename or copy detection: a rename is a delete and an add.
-- `log` and `show` print no ref decorations (`%d` in a `log` template does); commit abbreviations are 7 digits and are not
-  lengthened to stay unique.
+- Commit abbreviations are 7 digits and are not lengthened to stay unique; `log` and `show` print no color on a terminal.
 - A nested repository that the index does not track is one untracked `dir/`.
 - `merge` and `stash apply` detect no renames, write diff3 conflict markers whatever `merge.conflictStyle` says and merge only when
   there is one merge base (`merge -s ours` needs none); `stash apply` does not write `AUTO_MERGE`; `switch` and `checkout` print their own wording where git's differs (`Fast-forward` without a diffstat, the status
@@ -824,8 +874,42 @@ and a date without a zone is in the local timezone.
 Output after each commit: `--stat`, `--shortstat`, `--name-only`, `--name-status` and `-p`/`--patch`/`-u`, with `-U<n>` (which
 implies `-p`) for the context. `--stat` and `--shortstat` combine with `-p` (git prints `---` between the message and the stat
 when `--stat` and `-p` are both given); the other combinations are a usage error. The diff is against the first parent, or
-against the empty tree for a root commit, limited to the paths. A merge commit prints none (git needs `-m`, `-c` or `--cc` for
-that). The engine is the one `pyn diff` uses, including its `--stat` layout.
+against the empty tree for a root commit, limited to the paths. A merge commit prints none unless `-m`, `-c`, `--cc`,
+`--first-parent` or `--diff-merges` asks for one (see [Merge commits in `show` and `log`](#merge-commits-in-show-and-log)). The
+engine is the one `pyn diff` uses, including its `--stat` layout.
+
+`-<n>` is the same as `-n <n>`. `--all` starts from `HEAD` and every ref (`refs/`, including tags, remote-tracking branches and the
+stash), together with any revisions named. `--first-parent` follows only the first parent of each commit, with git's
+simplification when a path is given, and shows a merge's diff against its first parent. `--decorate[=short|full|auto|no]` (and git's boolean spellings;
+`--no-decorate`, the last of the two wins) names the refs at a commit after its id in `--oneline`, `oneline`, `short`, `medium`,
+`full`, `fuller` and `raw`; `%d` and `%D` always do, in the `full` form (`refs/heads/main`) under `--decorate=full`. Without a flag
+`log.decorate` decides (`short`, `full`, `auto`, `no`, git's booleans; a bare key is true, an unknown value is off) and
+otherwise `auto`: decorate when standard output is a terminal, so captured output has none. `auto` also decides for `--decorate=auto`.
+`--pretty=raw` is decorated only when a `--decorate` flag asks, as in git. `show` takes the same flags and config. A pyn server
+refuses them (`129`). `--decorate-refs=<pattern>` names only the refs that match, `--decorate-refs-exclude=<pattern>` and
+`log.excludeDecoration` (repeatable; ignored when `--decorate-refs` is given) leave refs out; they also filter `%d` and `%D`. A
+pattern without `refs/` gets it prepended (`tags/*` is `refs/tags/*`; `HEAD` stays), a glob uses `wildmatch` and any other pattern
+also matches the refs below it (`refs/heads/feature` matches `refs/heads/feature/x`). `HEAD -> <branch>` needs both to pass.
+`--source` is not built.
+
+`--follow -- <path>` needs exactly one path and walks the whole history, dropping the commits that do not touch the tracked
+path; when a commit adds it, git's rename detection (identical content, then at least half similar, see `pyn diff`) names the
+old path and the walk goes on with that. Merges are dropped (unless `--first-parent`). It takes no diff output (`-p`, `--stat`,
+`--name-only`, ...) and no `-S`/`-G`: a usage error. `-S<string>` keeps the commits that change the number of occurrences of the
+string in a file, `-G<regex>` those with an added or removed line matching an extended regular expression (never binary
+files); `-i` makes both ignore case. Both look at each file after rename detection, drop merges (unless `--first-parent`) and
+print only the matching files with a diff option. `-n` counts the commits that were kept, while `--skip` counts the ones the
+walk selected (as git). `-S` and `-G` together fail (`128`).
+
+`--graph` draws git's graph without colors in front of every line of every format, and orders the commits topologically (no commit
+before all of its children, as `--topo-order`), as git does. It works with revisions, `--all`, `--first-parent`, `--decorate`,
+`--skip` and `-n`. It fails (`128`, as git does) with `--reverse`, and with a path, which is not built; diff output
+(`-p`, `--stat`, ...), `--author`, `--committer`, `--grep`, `--merges`, `--no-merges`, `--since`, `--until`, `-S`, `-G` and
+`--follow` are usage errors (`129`).
+
+`-E` and `-F` change how `--grep`, `--author` and `--committer` read their patterns: extended regular expressions (the
+operators `( ) | + ? { }` without backslashes) or fixed strings; `--basic-regexp` restores the default, and the last of
+the three wins. `-G` is always extended. Back-references fail in both regular expression dialects.
 
 Differences from git:
 
@@ -840,6 +924,64 @@ Differences from git:
 - The `--stat` graph is at most 40 columns wide and names are never shortened; it has no `--stat=<width>` form.
 - Passing a revision that is not a commit, a dated reflog selector (`HEAD@{yesterday}`) or `:/<text>` fails with exit `128`
   where git accepts them.
+
+### Merge commits in `show` and `log`
+
+A merge commit's diff follows git's merge-diff options. The last one given wins:
+
+| Option | Merge shows |
+| --- | --- |
+| `--cc`, `--diff-merges=cc` (also `dense-combined`) | A dense combined diff, `diff --cc <path>` with `@@@` hunks: the paths that differ from every parent, leaving out the hunks where the result took one parent's text. The default of `show`. `--cc` also implies `-p` in `log`. |
+| `-c`, `--diff-merges=c` (also `combined`) | The same without the omissions (`diff --combined <path>`). `-c` implies `-p` in `log`. |
+| `-m`, `--diff-merges=m` (`on`, `separate`) | One ordinary diff per parent, each under its own copy of the header, `commit <id> (from <parent>)` (`<abbrev> (from <abbrev>) <subject>` with `--oneline`; none with a `--format` template). `-m` and `on` use `log.diffMerges` (`separate` when unset). `-m` alone prints no diff in `log`. |
+| `--first-parent`, `--diff-merges=first-parent` (`1`, `--dd`) | A diff against the first parent only. `--first-parent` chooses this unless one of the options above is given, in `show` and in `log -p`. |
+| `--no-diff-merges`, `--diff-merges=off` (`none`) | Nothing: the default of `log`. |
+
+`log` shows a merge's diff only when asked, and `--diff-merges=<mode>` alone shows merges (and no other commit) with the patch;
+`-c`, `--cc` and `--dd` show every commit's diff. `show` prints a merge's header, then a blank line, then the diff, even when
+the combined diff is empty (a clean merge) and with `--oneline`; `-s` and an empty `--format=` have no blank line. The combined layout is a port of git's:
+two-column `+ `, `- `, ` +`, `++` prefixes, `index a,b..c`, `mode a,b..c` and `new file mode` lines, `Binary files differ`
+for a binary file, one hunk comment of at most 40 bytes after the `@@@` line, and octopus merges with a column per parent.
+Paths are the ones every parent differs from, after the same rename detection as `pyn diff` (`-M`, `-C`, `--no-renames`
+and `-l` apply per parent); `-U<n>` sets the context. `--stat`, `--shortstat`, `--numstat` and `--summary` describe the
+result against the first parent, and `--name-only` and `--name-status` list the combined paths (`--name-status` with a
+letter per parent, `MM`); with a patch, a blank line separates them from it. `--stat -p` in `log` has no `---`.
+
+Not built, each a usage error (`129`): `--remerge-diff` and `--diff-merges=remerge` (also as the `log.diffMerges` value used
+by `-m`); `-w` and `--check` with a combined diff; a combined diff of a submodule; a merge of more than 62 parents; `-c`, `-m`
+and the other merge options with `log --graph`, `--follow`, `-S` or `-G`; `log -m`, `--diff-merges=separate` or
+`--diff-merges=first-parent` with a path, which also turns history simplification off. `--combined-all-paths` is an unknown
+option. An invalid `--diff-merges` value fails (`128`) as in git. `-m` and `--first-parent` diffs are `pyn diff`'s per parent,
+so they carry its line alignment, which can differ from git's on repetitive text.
+
+### Rename and copy detection
+
+On a git home `diff`, `show`, `log` and `stash show` pair a deleted file with an added one the way git's diffcore does, so
+their output matches git's byte for byte: `similarity index N%` with `rename from` and `rename to` (or `copy from` and `copy to`)
+in a patch, `{old => new}` names in `--stat` and `--numstat`, ` rename old => new (N%)` in `--summary`, and `R<nnn>` or `C<nnn>`
+in `--name-status`. A rename with no content change prints only its header. A mode change prints `old mode` and `new mode`
+first. The order of the steps is git's:
+
+1. Files with identical content, preferring a source with the same name, then a source no rename has used yet.
+2. Sources and added files whose name (after the last `/`) is unique on each side, when they are at least 75% alike (halfway
+   between the threshold and 100%).
+3. Every remaining pair, scored as git scores it (lines up to 64 bytes hashed into spans, with the share of the larger file's
+   bytes the two have in common), best first; a source is used once. Files that differ in size by more than the threshold, and
+   anything but regular files, are not compared.
+
+The threshold is 50%; `-M<n>` or `--find-renames=<n>` sets it (`-M90%`, `-M9`, `-M.5`), and the last of `-M`, `-C` and
+`--no-renames` wins. Detection is on by default (`diff.renames`), `diff.renames=copies` also finds copies, and `false` turns it
+off. `-C` adds copies from files the change modified; a deleted source copied to several places is a rename for the last
+destination in path order and a copy for the others. `-l<n>` and `diff.renameLimit` (default 1000) skip the exhaustive step
+when destinations times sources exceed the square of the limit, with git's warning. A path filter limits the files before
+pairing, so a rename across it shows as a deletion or an addition. `log -S` and `-G` pair before they filter.
+
+Not built, each a usage error (`129`): `-C -C` and `--find-copies-harder` (copies from unmodified files), including a bare `-C`
+while `diff.renames=copies`, which git reads as `-C -C`; `-B`; and `--follow` with diff output. `status` has no
+`--renames`, `--no-renames` or `-M`; it reads `status.renames` (else `diff.renames`) and shows a staged rename as `R  old -> new`
+(`C` for a copy), and a rename between the index and the work tree, which needs an intent-to-add file, as ` R`. Git 2.43 does
+not count a file's final span when it has no newline (or 64 bytes) to end it, so a similarity score can differ from git's by
+a few percent there; pyn follows git 2.55.
 
 ### The short status format
 
@@ -1223,7 +1365,7 @@ and `A...B` name ranges (applied oldest first, parents before children), and sev
 3. A clean result is committed with the reflog line `cherry-pick: <subject>` on the branch (or a detached `HEAD`) and `HEAD`,
    and printed as `[<branch> <abbreviation>] <subject>` with `Author:` when it differs from the committer and the number of
    files changed (git's `Date:` line and insertion counts are not printed). On an unborn branch the commit is a root commit.
-   `commit.gpgsign` signs it; `-S` is not built. Hooks are not run (one warning names them).
+   `commit.gpgsign` or `-S[<keyid>]` signs it, `--no-gpg-sign` does not. Hooks are not run (one warning names them).
 4. `-x` adds `(cherry picked from commit <id>)` (inside the trailer block the message ends with, else after a blank line) and
    `-s` a `Signed-off-by:` for the committer, in that order. `-n` leaves the merged result staged and in the files, writes the
    message to `MERGE_MSG` and commits nothing; with several commits each one merges onto the index the previous left.
@@ -1248,7 +1390,7 @@ state and leaves the index and files. With nothing in progress `--continue`, `--
 `commit` and `merge` still refuse while a cherry-pick is in progress.
 
 Differences from git: a range or list with a merge commit and no `-m` is refused before any commit is made (git applies the
-ones before it); `-e`, `--edit`, `--ff`, `--cleanup`, `-X`, `--strategy`, `--rerere-autoupdate`, `-S`, `--allow-empty` and
+ones before it); `-e`, `--edit`, `--ff`, `--cleanup`, `-X`, `--strategy`, `--rerere-autoupdate`, `--allow-empty` and
 `--keep-redundant-commits` are usage errors; `--no-edit` is accepted. Covered against the real git by
 `crates/pyn-cli/tests/git_cherry_pick.rs`.
 
@@ -1264,7 +1406,7 @@ Diff3 markers are labelled `HEAD` and `parent of <abbreviation> (<subject>)`, wi
 the files, the state files and the reflogs with the real git (`crates/pyn-cli/tests/git_revert.rs`).
 
 1. `-n` leaves the result staged and in the files and writes `MERGE_MSG` and `REVERT_HEAD`; `-s` adds `Signed-off-by:`;
-   `--no-edit` is accepted. `-x`, `-e`, `--edit`, `--cleanup`, `-X`, `--strategy`, `--rerere-autoupdate`, `-S`,
+   `--no-edit` is accepted. `-x`, `-e`, `--edit`, `--cleanup`, `-X`, `--strategy`, `--rerere-autoupdate`,
    `--allow-empty` and `--keep-redundant-commits` are usage errors.
 2. The reflog line is `revert: <subject>`, and `commit: <subject>` for a commit made by `--continue`.
 3. A conflict exits `1` with `error: could not revert <abbreviation> (<subject>)`, the hints, the unmerged entries, markers,
@@ -1437,8 +1579,8 @@ The upstream stays the new base (`--onto` aside), the comment line still says `<
 point is not the new base is not fast-forwarded. In `no-rebase-cousins` mode the sheet then keeps the fork point as the base of
 the branch, as git does.
 
-Differences from git: `-s`, `-X`, `--signoff`, `--keep-base`, `--reapply-cherry-picks`, `--apply`, `--empty` other than `drop` and
-`-S` are usage errors (`129`). A `merge` of several labels (an octopus merge) stops with `octopus merges are not built` and
+Differences from git: `-s`, `-X`, `--signoff`, `--keep-base`, `--reapply-cherry-picks`, `--apply` and `--empty` other than `drop`
+are usage errors (`129`). A `merge` of several labels (an octopus merge) stops with `octopus merges are not built` and
 leaves the command first in the sheet; git continues it (`git rebase --continue`) and a merge whose branches have more than one
 merge base stops the same way. pyn writes `AUTO_MERGE` only for a merge that stopped on conflicts; git writes it for every pick. A workspace's own
 rebase refuses `fixup -C`/`-c` and `--rebase-merges`, `--root`, `--fork-point` and `--update-refs` (and the sheet commands `label`,
@@ -1481,9 +1623,23 @@ need git installed. It writes the signature as git encodes it, so the object ids
 - `tag.gpgsign` makes every tag annotated and signed, so it needs `-m`. If the signer fails or is missing, nothing is written
   and the exit status is `128`.
 
+The other commands that create commits sign them the same way and through the same signer:
+
+- `merge` signs the merge commit, `cherry-pick` and `revert` each commit they make, `rebase` (also `-i` and `--rebase-merges`)
+  each commit it replays, rewords or merges, and `pull` passes `-S` and `--no-gpg-sign` to its merge or its rebase. A
+  commit a rebase or cherry-pick fast-forwards over is reused, not signed again, as in git.
+- `-S[<keyid>]`, `--gpg-sign[=<keyid>]` and `--no-gpg-sign` (the last of the two wins) are accepted on all of them and win over
+  `commit.gpgsign`, which signs them when set. There is no `rebase.gpgSign` or `merge.gpgSign`, as in git. A stopped
+  cherry-pick, revert or rebase keeps the flag (`sequencer/opts`, `gpg_sign_opt`) for `--continue`, so the commits made after the
+  conflict are signed too; `pyn commit` and `pyn merge --continue` take their own flags. A pyn server workspace refuses the flags.
+- `stash` commits and the empty commit a `rebase --root` builds on are not signed, as in git.
+- A signer that fails, or a bad `gpg.format`, writes no commit. The branch does not move and the command stops with `128`,
+  leaving a merge, cherry-pick, revert or rebase stopped where it can be retried: `MERGE_HEAD` (merge), `CHERRY_PICK_HEAD` or
+  `REVERT_HEAD`, or the failed pick first in the rebase sheet, as git does. Fix the signer and run `pyn commit`,
+  `--continue` or the command again.
+
 `log --show-signature` and `verify-commit` / `verify-tag` equivalents are not built: pyn does not verify signatures, and `log
---show-signature` stays a usage error. `pyn merge`, `pull` and the other commands that create commits do not sign (their `-S`
-is a usage error), even with `commit.gpgsign=true`.
+--show-signature` stays a usage error.
 
 ### Stashing
 
@@ -1523,13 +1679,13 @@ git 2.43 cannot stash in a SHA-256 repository, so the SHA-256 stash is tested fo
 
 ### Choosing hunks
 
-`add -p`, `restore -p` and `stash push -p` share one prompt, with git's header, hunks, keys and texts. For each changed file it
+`add -p`, `restore -p`, `checkout -p`, `reset -p` and `stash push -p` share one prompt, with git's header, hunks, keys and texts. For each changed file it
 prints the diff header, then each hunk followed by `(<n>/<total>) <Verb> this hunk [<keys>]? `, and reads a line from standard
-input. `<Verb>` and the help text follow the command: `Stage` for `add`, `Stash` for `stash`, `Unstage` for `restore --staged`,
+input. `<Verb>` and the help text follow the command: `Stage` for `add`, `Stash` for `stash`, `Unstage` for `restore --staged` and `reset`,
 `Discard ... from worktree` / `from index and worktree` for `restore` from the index or `HEAD`, and `Apply ... to worktree`,
 `to index` / `to index and worktree` when `--source` names anything but the literal word `HEAD` (the diff is then shown from the
 current state towards the source, with the `a/` and `b/` names swapped, as git does). A mode change, a deletion and an addition
-are asked as `mode change`, `deletion` and `addition`.
+are asked as `mode change`, `deletion` and `addition` (an empty file added or removed has no lines to show, but is still asked about).
 
 The answers are `y`, `n`, `q`, `a`, `d` (upper case too), `j`, `J`, `k`, `K`, `g`, `/`, `s`, `e`, `p`, `P` and `?`, as in git 2.55.
 An answer is one letter: a blank line asks again, `Only one letter is expected, got '<text>'` answers a longer one (except `g<n>`
@@ -1550,7 +1706,7 @@ With nothing to ask about it prints `No changes.` (or `Only binary files changed
 
 What a choice does: `add -p` writes the chosen hunks (and mode changes) into the index only. `restore -p` takes them out of the
 work tree, the index or both; when the chosen hunks fit the work tree but not the index it says so and asks
-`Apply them to the worktree anyway? ` as git does. `stash push -p` shows `HEAD` against the work tree, ignoring the index and new
+`Apply them to the worktree anyway? ` as git does (a mode change that differs from the file's mode only warns, as `git apply` does). `stash push -p` shows `HEAD` against the work tree, ignoring the index and new
 files, saves a stash whose work tree is `HEAD` with the chosen hunks, takes them out of the work tree and keeps the index
 (`--no-keep-index` also puts the staged changes of the paths back to `HEAD`); `-u` is refused, and with no hunk chosen it prints
 `No changes selected` and exits `1`. Each file is applied as soon as its questions are over, as git does. `add -p` cannot be
@@ -1562,8 +1718,33 @@ the `regex` crate's; the diff uses 3 lines of context and ignores `diff.context`
 `interactive.diffFilter` and `interactive.singleKey` are not read). git 2.43 differs from 2.55 in the prompt (no `p`, `P` or
 `(was: ...)`, `j`/`k` offered only when they apply, help wording, hunk printed again after every answer, first letter of a longer
 answer taken, end of input moving on to the next file, messages on standard error); pyn follows 2.55, and the tests that compare
-with the real git check only the index, work tree, stash and exit status, on inputs both versions treat alike. Covered by
+with the real git check the index, work tree, stash and exit status, on inputs both versions treat alike, and with git 2.55 or later the whole transcript on standard output. Covered by
 `git_patch.rs`.
+
+### Interactive add
+
+`add -i [<path>...]` prints the status table (`staged` and `unstaged` as `+<added>/-<deleted>`, `binary`, `unchanged` or
+`nothing`; no rename detection, an intent-to-add file counts as `+0/-0` staged) and the menu, and reads one line per prompt from
+standard input, like git's built-in version. A command is chosen by number or by a unique prefix of its name (`s`, `u`, `r`,
+`a`, `p`, `d`, `q`, `h`); a blank line shows the menu again, `?` the prompt help and anything else says `Huh (<text>)?` on
+standard error. End of input leaves with `Bye.`. The commands that list files take numbers, ranges (`3-5`, `5-`), a comma or
+space separated list, `-` to unselect, `*` for all, and a name or unique prefix of it (the prefix is shown in brackets, up to
+four characters), as git does, with its quirks (`1x` selects from item 1 to the end). A blank line ends the choice.
+
+- `status` lists the files; `update` stages the work tree state of the chosen files (a file that is gone is removed from the
+  index) and says `updated <n> path(s)`; `revert` puts the chosen index entries back to `HEAD`, naming the files `HEAD` does not
+  have (`note: <path> is untracked now.`), and says `reverted <n> path(s)`; `add untracked` stages chosen untracked files
+  (`added <n> path(s)`, `No untracked files.`); `diff` shows `diff --cached` against `HEAD` for the chosen files; `help`
+  describes the commands.
+- `patch` asks about the chosen files' hunks with the prompt of [`add -p`](#choosing-hunks) (binary files are left out;
+  `No changes.` or `Only binary files changed.` goes to standard error when none is left).
+- Paths limit every list, are taken from where you stand, and the names in the lists are relative to the repository root.
+  `-N`, `-u`, `-A`, `-f` and `-v` are accepted and ignored, `-p` wins over `-i`, and `-n` is `fatal` (`128`), as in git.
+
+Differences: colour (`color.interactive`), `interactive.diffFilter`, `interactive.singleKey` and `diff.context` are not read;
+paths with unmerged entries are refused for the whole command; the text of the `diff` command comes from `pyn diff --cached`.
+git 2.43 keeps a carriage return at the end of an input line, which later versions strip; pyn strips it. Covered by
+`git_add_interactive.rs`, which gives the same input to git and pyn in SHA-1 and SHA-256 repositories.
 
 ### Clean
 
@@ -1619,6 +1800,130 @@ the items after it), but the filter prompt stops at the end of input where git c
 for every answer the menu reads. Covered against the real git, on SHA-1 and SHA-256 repositories, by
 `crates/pyn-cli/tests/git_clean.rs`, which compares exit status, the work tree and the actions taken, not the menu text.
 
+### Grep
+
+`grep` prints git's lines for the pattern: `<path>:<line>` (with `-n`, `<path>:<number>:<line>`), paths relative to where you
+stand, quoted as git quotes them, in index order, and with revisions `<rev>:<path>` for each revision in turn. The exit
+status is `0` when anything matched (also under `-q`), `1` when nothing did, `128` for a fatal error (no pattern, a bad
+pattern, an unknown revision or path, `--cached` with a revision) and `129` for a usage error. A file with a NUL in its first
+8000 bytes is binary and prints `Binary file <name> matches` once (`-a` searches it as text, `-I` skips it); `-c` and `-l`
+treat it like any other file. Without a revision only tracked, regular files are searched, from the work tree (a file deleted
+there is skipped, an intent-to-add file is searched, an unmerged path once); `--cached` reads the index and leaves out
+unmerged and intent-to-add paths. Symbolic links and submodules are never searched. Options go before the pattern, as git
+requires, and `--` ends the revisions. Pathspecs are relative to where you stand, take `*`, `?` and `[...]` globs (a `*`
+crosses folders) but no `:` magic, and default to the current folder. The settings `grep.lineNumber`, `grep.patternType`
+(`default`, `basic`, `extended`, `fixed`), `grep.extendedRegexp`, `grep.fullName` and `core.quotePath` are read; colour is
+never produced.
+
+Patterns are POSIX basic expressions by default (`-G`), extended with `-E` (the last of `-G`, `-E`, `-F` wins), or fixed
+strings. The GNU additions git relies on work in both: `\w \W \s \S \b \B \< \>`, and in basic expressions `\| \+ \?`.
+Expressions are translated for the `regex` crate in `crates/pyn-cli/src/git_home/grep_regex.rs`, with the error messages of
+the GNU library (`fatal: command line, '<pattern>': Unmatched ( or \(`; `-e option, '...'` for `-e`). A pattern is split at
+newlines into several, as git does. `--and`, `--or`, `--not` and parentheses combine patterns per line with git's
+precedence (`--not`, then `--and`, then `--or`, which juxtaposed patterns also mean); a stray `--or` is ignored as git does.
+A plain pattern list that matches an empty line also matches the empty line git imagines after a final newline (so
+`grep -n '^$'` reports one more line for a file that ends in a newline), exactly as git does, but not with `-v`, `-w` or
+`--and`/`--not`/parentheses.
+
+What differs, all of it refused or documented rather than silently different:
+
+| Difference | pyn |
+| --- | --- |
+| Back-references (`\1`, `(a)\1`) | Fatal error `back-references are not supported` (`128`); a reference to a group that does not exist gives git's `Invalid back reference`. |
+| Alternation with `-w` | The regex engine takes the first branch that matches, where the GNU library takes the longest: `grep -Ew 'a\|ab'` can miss a word git finds. Without `-w` a line matches either way. |
+| ``\` ``, `\'` | Refused (`128`): git's result depends on how it reads the file, not on the line. With `-i`, a backslash before a lowercase letter that is not an operator (`\a`) is refused: git matches nothing there. |
+| Locale | Matching is by characters in UTF-8, as in a UTF-8 locale; `[[:alpha:]]` and similar classes are ASCII only. A pattern that is not valid UTF-8 is refused. |
+| Binary attributes | `.gitattributes` (`binary`, `-diff`, `diff`) and `textconv` are not consulted; a file is binary by its content only. |
+| Revisions | Commits and tags that peel to one (`HEAD~2`, a branch, a hash); a tree such as `HEAD:sub` is not a revision here, so it is read as a path and fails with git's `ambiguous argument`. |
+| Not built (usage error `129`) | `--untracked`, `--no-index` (so also searching outside a repository), `--recurse-submodules`, `--exclude-standard`, `-o`, `-L`, `-z`, `-f`, `-m`, `-P`, `-A`, `-B`, `-C`, `-p`, `-W`, `--column`, `--heading`, `--break`, `--color`, `--all-match`, `--max-depth`, abbreviated long options, and `:` pathspec magic. |
+
+Covered against the real git, on SHA-1 and SHA-256 repositories, by `crates/pyn-cli/tests/git_grep.rs` (output, order and
+exit status for the work tree, the index, revisions, binary files, subfolders, conflicts and a few hundred patterns of
+both syntaxes) and `crates/pyn-cli/tests/git_exit_status.rs`, which compare only behaviour the git releases in use agree on.
+
+### Bisect
+
+`bisect` is `git bisect` with the same search, text, exit statuses and state. `start [<bad> [<good>...]] [-- <path>...]`
+begins (a bare `start` waits for `bad` and `good`), `good`/`old` and `bad`/`new` (or the words chosen with
+`--term-good`/`--term-old` and `--term-bad`/`--term-new`) answer for the commit checked out or the revisions named, `skip`
+takes revisions or `<a>..<b>` ranges, `next` repeats the step, `reset [<commit>]` ends it, `log` prints the record,
+`replay <file>` redoes one, `terms` prints the words and `run <command>...` answers by exit status until the bad commit is
+found. `--no-checkout` leaves `HEAD` alone and moves `BISECT_HEAD`; `--first-parent` follows only first parents.
+
+Each step prints `Bisecting: N revisions left to test after this (roughly M steps)` and `[<id>] <subject>`, and checks the
+commit out detached (the reflog line is `checkout: moving from <branch or id> to <id>`). The commit tried is the one git
+picks: the candidates are the commits reachable from the bad one and not from the good ones (history-simplified for a path
+limit), each weighed by how many candidates it reaches, and the one closest to half wins, with git's tie rules and its
+choice away from skipped commits. When a bad commit has no candidate before it, `<id> is the first bad commit` follows with
+the commit message and diffstat, and the bisection stays recorded until `reset`. Good commits that are not ancestors of the
+bad one make it test their merge base first (`Bisecting: a merge base must be tested`). Exit statuses are git's: `0` for a
+step and for the report, `1` for an error, `2` when only skipped commits are left, `3` for a bad merge base, `4` when a path
+limit leaves nothing to test, `129` for a usage error and `128` for a fatal one. `run` ends with `0` once the first bad
+commit is found. The command's status `0` means good, `125` skip and `1` to `127` bad; a status of `128` or more ends the
+run, and `bisect run` then exits with `256` minus that status. A first status of `126` or `127` makes `run` try the command on
+a good commit before it believes the status.
+
+The state is git's, byte for byte: `BISECT_START`, `BISECT_LOG`, `BISECT_TERMS`, `BISECT_NAMES`, `BISECT_EXPECTED_REV`,
+`BISECT_ANCESTORS_OK`, `BISECT_FIRST_PARENT`, `BISECT_HEAD` and `BISECT_RUN` in the git directory of the work tree, and
+`refs/bisect/<bad>`, `refs/bisect/<good>-<id>` and `refs/bisect/skip-<id>`. A bisection started by either tool continues
+in the other, and a log from either replays in the other.
+
+What differs, all of it refused or documented rather than silently different:
+
+| Difference | pyn |
+| --- | --- |
+| `visualize`, `view` | Usage error (`129`): they start `gitk` or `git log`. |
+| `skip <a>...<b>` | Usage error (`129`); `<a>..<b>` is built. |
+| Pathspecs | Paths and `*`, `?`, `[...]` globs, relative to where `start` and the later steps run; `:` magic is not read. |
+| Prompts | With a terminal on standard input, the questions git asks (`Do you want me to do it for you [Y/n]?`, `Are you sure [Y/n]?`) are asked and answered there; otherwise git's non-interactive answers apply. |
+| Wording | Messages say `pyn bisect` where git says `git bisect`; the text in `BISECT_LOG` stays `git bisect` so both tools read it. The report quotes the terms (`first 'bad' commit`) as git 2.55 does; older gits print them bare. |
+| `bisect run` | The command runs through `sh -c` from the work tree root, as git runs it. |
+| Linked work trees | Each work tree has its own state, as in git. |
+
+Covered against the real git, on SHA-1 and SHA-256 repositories, by `crates/pyn-cli/tests/git_bisect.rs` (a bad commit at
+several places of a straight history, random merge histories with equal and skewed commit times, skipped commits and
+ranges, path limits, `--first-parent`, `--no-checkout`, custom terms, `run`, `reset`, `replay`, and bisections that git
+starts and pyn continues, and the reverse; output, exit statuses, `HEAD`, refs and files are compared) and
+`crates/pyn-cli/tests/git_exit_status.rs`, which compare only behaviour the git releases in use agree on.
+
+### Blame
+
+`blame` and `annotate` print git's lines: for each line of the file at `<rev>` (the work tree file when no revision is
+given) the commit that last changed it, found by diffing along the parents as git does. A parent whose file is identical
+takes all of it; otherwise each parent in order takes the lines that are unchanged against it, so a merge hands a line to
+its first parent when both have it. A file that is not in a parent under the same path is looked up as a rename (exact
+content, then a uniquely same-named file at least 75% similar, then the best match of at least 50%) and
+followed; `-f` shows the old names. The diff is a port of git's own line diff with its hunk placement and
+`diff.indentHeuristic`, so ambiguous insertions land on the same lines. Every layout is git's: the default (abbreviated id
+with `^` on boundary commits, author, date, line number, aligned), `-e`, `-s`, `-f`, `-n`, `-l`, `-t`, `-b`, `--root`,
+`--abbrev=<n>`, `--date=<default|iso|iso-strict|rfc|short|relative|unix|raw>`, `-p` and `--line-porcelain`, and
+`annotate`'s tab-separated layout (also `-c`). `-L <start>,<end>`, `,+<n>`, `,-<n>`, `/<regex>/` (a basic expression)
+and `^/<regex>/` anchors work as git reads them, repeated or overlapping. `-w` ignores whitespace when comparing a commit
+with its parent. Revisions are `<rev>` (before or after the file, with or without `--`), `<a>..<b>` and `^<rev>`;
+commits reachable from the excluded side are boundaries, and so are root commits unless `--root` or `blame.showRoot`.
+`blame.blankBoundary`, `blame.showEmail`, `blame.date`, `diff.indentHeuristic` and `core.abbrev` are read.
+
+A modified work tree file is blamed on `Not Committed Yet <not.committed.yet>` at the current time, with `HEAD` (and
+`MERGE_HEAD`) as parents; `--contents <file>` (or `-` for standard input) does the same for another file's content as
+`External file (--contents)`. A file that is not in `HEAD` or the index is a fatal error (`128`), as is a path missing
+from the named revision. A binary file is blamed line by line like git does, not refused. The exit status is `0`, `128`
+for a fatal error and `129` for a usage error.
+
+What differs, all of it refused or documented rather than silently different:
+
+| Difference | pyn |
+| --- | --- |
+| Not built (usage error `129`) | `-M`, `-C`, `--incremental`, `-L :<funcname>`, `--ignore-rev`, `--ignore-revs-file`, `--reverse`, `--first-parent`, `--show-stats`, `--progress`, `--score-debug`, `--color-lines`, `--color-by-age`, `--minimal`, `--diff-algorithm`, `-S`, abbreviated long options, `<a>...<b>`, the other revision-list options, and `--date=human`, `local`, `format:...` and `auto:...`. |
+| Refused (`128`) | A `.mailmap`, `mailmap.file` or `mailmap.blob` (names are not mapped), and `diff.algorithm` other than `myers`. |
+| Abbreviation length | `core.abbrev`, else 7 digits, grown until the abbreviation of every blamed commit is unique, plus one for the boundary mark. Git also lengthens its default for repositories with tens of thousands of objects; pyn does not. |
+| Content filters | `textconv`, `core.autocrlf` and `.gitattributes` conversions are not applied to committed blobs or to the work tree file. |
+| Commit encodings | Author names and subjects are printed as stored, without re-encoding from an `encoding` header. |
+| Renames | The single added path is matched as git's rename detection would, but `diff.renameLimit` is not applied. |
+
+Covered against the real git, on SHA-1 and SHA-256 repositories, by `crates/pyn-cli/tests/git_blame.rs` (every layout,
+ranges, renames, merges, boundaries, a dirty work tree, awkward files and seeded random histories) and
+`crates/pyn-cli/tests/git_exit_status.rs`, which compare only behaviour the git releases in use agree on.
+
 ### Reflogs
 
 pyn appends the reflog lines git would, when `core.logAllRefUpdates` would: `HEAD`, `refs/heads/*`, `refs/remotes/*` and
@@ -1665,6 +1970,78 @@ as the earlier one left it). `--rewrite` makes each kept line start where the on
 non-symbolic ref at the newest kept line when the newest was removed. `--verbose` prints `keep`, `prune` or `would prune` and
 the message per line to standard error. Not built: `show --all`, other `log` options (`--format`, `--date`), and the per-ref
 `gc.<pattern>.reflogExpire` settings.
+
+### Inspection commands
+
+`rev-parse`, `ls-files`, `ls-tree`, `cat-file`, `show-ref`, `shortlog`, `describe` and `name-rev` print what git prints, byte for
+byte, with git's exit statuses; `crates/pyn-cli/tests/git_plumbing.rs` compares each with the real git on the same repository
+(SHA-1 and SHA-256, loose and packed objects, from the root and from folders). They read the repository and never write it.
+Options that are not listed here are a usage error (`129`), where git would accept them. Outside a git repository they fail
+with `fatal: not a git repository (or any of the parent directories): .git` (`128`).
+
+| Command | Supported |
+| --- | --- |
+| `rev-parse` | `<rev>` in any form `log` takes, plus `^{}`, `^{commit}`, `^{tree}`, `^{blob}`, `^{tag}`, `^{object}`, `<tree-ish>:<path>` (also `./` and `../` paths), `:<path>` and `:<n>:<path>` for the index, `^<rev>`, `<a>..<b>`, `<a>...<b>`, `<rev>^@`, `<rev>^!`; `--verify`, `-q`, `--short[=<n>]`, `--abbrev-ref[=strict\|loose]`, `--symbolic`, `--symbolic-full-name`, `--git-dir`, `--absolute-git-dir`, `--git-common-dir`, `--show-toplevel`, `--show-prefix`, `--show-cdup`, `--is-inside-work-tree`, `--is-inside-git-dir`, `--is-bare-repository`, `--show-object-format`, `--all`, `--branches`, `--tags`, `--remotes`. Options act on the revisions after them, as in git; a name that is no revision is printed back and must be a file. |
+| `ls-files` | `-c`, `-d`, `-m`, `-o`, `-s`, `-u`, `-i` with `--exclude-standard`, `-z`, `--full-name`, `--error-unmatch`, and pathspecs (`*` and `?` are patterns; `:(...)` magic is a usage error). Paths are relative to the current folder, and only that folder is listed unless a pathspec says otherwise. `-m` lists deleted files too, so `-m -d` lists them twice, as git does. |
+| `ls-tree` | `-d`, `-r`, `-t`, `-l`, `-z`, `--name-only`, `--name-status`, `--object-only`, `--full-name`, `--full-tree`, `--abbrev[=<n>]`, and paths. Paths are literal; `.` and `..` name a folder's contents. |
+| `cat-file` | `-t`, `-s`, `-p`, `-e`, `<type> <object>` (tags are followed to the type), `--batch` and `--batch-check` with git's default format. |
+| `show-ref` | `--head` (shown whatever the other options say, as git documents), `--heads`, `--tags`, `-d`, `-s`/`--hash[=<n>]`, `--abbrev[=<n>]`, `--verify`, `--exists`, `-q`, and patterns that match the end of a ref name on a `/`. |
+| `shortlog` | `-n`, `-s`, `-e`, `-c`, a revision range and `-- <path>...`; with no revision it reads a `git log` on standard input unless that is a terminal, then it uses `HEAD`. Refused (`128`) when the repository has a `.mailmap` file or sets `mailmap.file` or `mailmap.blob`, which git would apply. |
+| `describe` | `--tags`, `--all`, `--always`, `--long`, `--abbrev=<n>`, `--dirty[=<mark>]`, `--match`, `--exclude`, `--exact-match`, `--candidates=<n>`, and commit-ishes. The nearest tag is chosen by the walk git uses, including its limit of candidate tags. Describing a blob and `--first-parent`, `--contains` and `--broken` are not built. |
+| `name-rev` | `--tags`, `--name-only`, `--no-undefined`, `--always` and commit-ishes. `--all`, `--stdin`, `--annotate-stdin`, `--refs` and `--exclude` are not built, and `name-rev` with no commit is a usage error where git prints nothing. |
+
+Abbreviations (`--short`, `--abbrev`, `describe`) start at `core.abbrev` or 7 digits and grow until the id is unique among all
+objects. git also grows the default length with the size of the repository (8 digits from about 16,000 objects); pyn does not,
+so past that size a default abbreviation can be one digit shorter than git's.
+
+### Patches
+
+`format-patch`, `apply` and `am` write and read the same text as git, and `crates/pyn-cli/tests/git_format_patch.rs`,
+`git_apply.rs` and `git_am.rs` compare each with the real git on twin repositories (SHA-1 and SHA-256): standard output, the
+files written, exit statuses, whether standard error carries anything, the work tree, the index and, for `am`, the commit ids
+and the session files in `.git/rebase-apply`, so git can carry on a session pyn stopped and the other way round. Settings and
+options that are not listed are a usage error (`129`) where git would accept them; settings that change the result and are
+not read (`format.*`, `am.*`, `apply.whitespace`, `apply.ignoreWhitespace`, `core.whitespace`) are refused the same way.
+
+| Command | Supported |
+| --- | --- |
+| `format-patch` | `<since>`, `<a>..<b>`, `-<n>` (alone, or ending at a revision), `--root`, `--stdout`, `-o <dir>`, `-n`/`--numbered`, `-N`/`--no-numbered`, `--subject-prefix`, `--cover-letter`, `-s`/`--signoff`, `--signature`, `--no-signature`, `--no-stat`/`-p`, `-U<n>`, `--suffix`, `-q`, `--no-renames`. Merge commits are skipped. Files are named `0001-subject.patch` as git names them and listed on standard output. Subjects and names are wrapped and encoded (`=?UTF-8?q?...?=`) as git does, with the MIME headers when the message is not ASCII. With no revision it uses `@{upstream}`, and prints nothing when there is none. |
+| `apply` | `--check`, `--stat`, `--numstat`, `--summary`, `--apply`, `--index`, `--cached`, `-R`, `-p<n>`, `-3`/`--3way`, `--whitespace=warn\|nowarn`, `--allow-empty`, patch files and `-` (standard input). |
+| `am` | mbox files and standard input, `--continue`/`-r`, `--skip`, `--abort`, `--quit`, `--show-current-patch[=diff\|raw]`, `-3`/`--3way`, `-s`/`--signoff`, `-q`, `--whitespace=warn\|nowarn`, `-S`/`--gpg-sign`, `--no-gpg-sign`. |
+
+`format-patch` ends each patch with `-- ` and `pyn <version>` where git prints its own version. A rename is a delete and a
+create (the diff has no rename detection), and a binary change is a usage error (`129`). `--cover-letter` is refused (`129`)
+when the range walks over a merge commit, because git's diffstat for that letter depends on what it walked. A commit message
+with a long first paragraph is joined and wrapped at 78 columns as git does.
+
+`apply` takes hunks exactly where git does: the context must match without fuzz, searched outwards from the line the hunk
+names, and a hunk without leading or trailing context is held to the start or end of the file. Everything is checked before
+anything is written, so a failure changes nothing (`1`; a malformed patch is `128`). It handles creations, deletions, renames,
+copies, mode changes, symlinks and several patches (or several files) in one input, applies to the work tree alone, to the work
+tree and index (`--index`, which requires the work tree to match the index by content, where git compares file stat data) or to
+the index alone, and reports whitespace errors in added lines (trailing whitespace, a space before a tab, blank lines at the end
+of the file) as `--whitespace=warn` does, but only when it applies the patch, as git does. `--3way` merges each file against the
+blob the patch's `index` line names; conflicts are left as `ours`/`theirs` markers (with a base section when
+`merge.conflictStyle` is `diff3`; `zdiff3` is a usage error) and as unmerged index entries, with `U <path>` and exit `1`.
+Binary patches (`GIT binary patch`), submodule patches and these options are a usage error (`129`): `--reject`, `-C`,
+`--ignore-space-change`, `--ignore-whitespace`, `--unidiff-zero`, `--directory`, `--include`, `--exclude`, `-z`, `--recount`,
+`--inaccurate-eof`, `--build-fake-ancestor`, `-N`, `--unsafe-paths`, `-v`, `-q`, `--no-add` and `--whitespace=error`, `fix`
+and `strip`. A `Binary files a and b differ` patch without data is refused at apply time as git refuses it. `apply` runs only
+inside a git repository.
+
+`am` reads UTF-8 and ASCII emails (`Content-Transfer-Encoding` 7bit or 8bit, no multipart) with RFC 2047 headers and the
+author, date and subject taken from the email or from the first lines of its body; the subject loses `Re:` and `[...]` tags, and
+the message ends at the `---` line. It applies each patch with `apply --index`, commits it with the author and date of the
+email and the committer from the configuration, logs `am: <subject>` and keeps the session in `.git/rebase-apply` with git's
+file names. Commits are signed when `commit.gpgsign` is set or `-S` is given (`--no-gpg-sign` overrides the setting), with
+`-S` applying to the invocation that gives it, as in git. On a failure it prints `Patch failed at <nnnn> <subject>` and the
+lines telling how to go on (naming `pyn am`), and exits `128`; `--continue` commits the index, `--skip` resets to `HEAD` and
+goes on, `--abort` restores `ORIG_HEAD`. `--3way` rebuilds a base from the blobs in the patch's `index` lines, applies the
+patch to it, and merges the result with the current tree as `cherry-pick` merges: conflict markers are diff3 style whatever
+`merge.conflictStyle` says, and no `Removing <path>` lines are printed (older git, which merges with merge-recursive, prints them). Maildirs, StGit and Mercurial formats, `-k`, `-b`, `-c`/scissors, `--ignore-date`, `--committer-date-is-author-date`,
+`-i`, `--rerere-autoupdate`, `--allow-empty` and `-C`/`-p` are not built (a patch with no changes stops the session with
+`Patch is empty.` and the hint to record an empty commit is left out). Hooks (`applypatch-msg`, `pre-applypatch`,
+`post-applypatch`) are not run, with the usual warning when one exists.
 
 ### What pyn will not write
 

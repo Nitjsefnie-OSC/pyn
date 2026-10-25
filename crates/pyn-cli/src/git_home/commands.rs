@@ -12,10 +12,13 @@ use pyn_gitwork::{
 };
 use pyn_object::ObjectId;
 
+use super::decorate::{DecorateArgs, with_decoration};
+use super::merge_diff::{Body, MergeArgs, Shape, Want, with_from};
 use super::{GitHome, path_string, stage};
 use crate::backend::Backend;
-use crate::commit_format::{Context, Decorations, FormatArgs, Rendering, render};
+use crate::commit_format::{Context, FormatArgs, Rendering, render};
 use crate::diff::{self, Blob, Source, Tree};
+use crate::rename;
 use crate::short_status::{self, Format, Row, StatusArgs};
 use crate::{Command, table, unsupported};
 
@@ -55,11 +58,22 @@ pub fn run(command: Command, git: &GitHome, cwd: &Path) -> Result<()> {
             Ok(())
         }
         Command::Show {
-            commit,
+            args,
+            paths,
             no_patch,
             fmt,
+            decorate,
             format,
-        } => show(git, commit.as_deref(), no_patch, &fmt, &format.format()),
+            first_parent,
+            merges,
+        } => show(
+            git,
+            cwd,
+            (&args, &paths),
+            (no_patch, first_parent, &merges),
+            (&fmt, &decorate),
+            &format.format(),
+        ),
         Command::Log {
             path,
             filter,
@@ -101,21 +115,57 @@ pub fn run(command: Command, git: &GitHome, cwd: &Path) -> Result<()> {
             }
             Ok(())
         }
+        Command::Grep(_) => {
+            if !super::grep::grep(git, cwd)? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Command::Bisect(args) => super::bisect::bisect(git, cwd, args),
+        Command::Blame(args) => super::blame::blame(git, cwd, args, false),
+        Command::Annotate(args) => super::blame::blame(git, cwd, args, true),
         Command::Reflog(args) => super::reflog::reflog(git, args),
+        Command::RevParse(args) => super::rev_parse::rev_parse(git, cwd, args),
+        Command::LsFiles(args) => super::ls_files::ls_files(git, cwd, args),
+        Command::LsTree(args) => super::ls_tree::ls_tree(git, cwd, args),
+        Command::CatFile(args) => super::cat_file::cat_file(git, cwd, args),
+        Command::ShowRef(args) => super::show_ref::show_ref(git, args),
+        Command::Shortlog(args) => super::shortlog::shortlog(git, cwd, args),
+        Command::Describe(args) => super::describe::describe(git, cwd, args),
+        Command::NameRev(args) => super::name_rev::name_rev(git, cwd, args),
+        Command::Am(args) => super::am::am(git, cwd, args),
+        Command::Apply(args) => super::apply::apply(git, cwd, args),
+        Command::FormatPatch(args) => super::format_patch::format_patch(git, cwd, args),
         Command::Rebase(args) => super::rebase::rebase(git, &args),
         Command::Remote(args) => super::remote::remote(git, args),
         Command::Fetch(args) => super::fetch::fetch(git, args),
         Command::Pull(args) => super::pull::pull(git, args),
         Command::Push(args) => super::push::push(git, args),
         Command::Add {
+            dry_run: true,
+            patch: true,
+            ..
+        }
+        | Command::Add {
+            dry_run: true,
+            interactive: true,
+            ..
+        } => bail!("options '--dry-run' and '--interactive/--patch' cannot be used together"),
+        Command::Add {
             paths, patch: true, ..
         } => super::patch_mode::add(git, cwd, &paths),
+        Command::Add {
+            paths,
+            interactive: true,
+            ..
+        } => super::add_interactive::add_interactive(git, cwd, &paths),
         Command::Add {
             paths,
             update,
             dry_run,
             verbose,
             force,
+            intent_to_add,
             ..
         } => {
             let options = stage::AddOptions {
@@ -124,6 +174,7 @@ pub fn run(command: Command, git: &GitHome, cwd: &Path) -> Result<()> {
                 dry_run,
                 verbose,
                 force,
+                intent_to_add,
             };
             if stage::add(git, cwd, &options)? {
                 std::process::exit(1);
@@ -288,7 +339,8 @@ pub(super) fn status(git: &GitHome, cwd: &Path, args: &StatusArgs) -> Result<()>
             .transpose()?;
         let prefix = git.ws.repo_prefix(cwd, ".")?;
         let quote_high = git.repo.bool_setting("core.quotePath", true);
-        let rows = short_rows(&status.entries, format);
+        let moves = status_moves(git, &status)?;
+        let rows = short_rows(&status.entries, format, &moves);
         return short_status::print(
             &rows,
             branch.as_deref(),
@@ -337,6 +389,10 @@ pub(super) fn status_table(status: &pyn_gitwork::Status) -> Result<()> {
     Ok(())
 }
 
+fn move_letter(m: &rename::Moved) -> char {
+    if m.copy { 'C' } else { 'R' }
+}
+
 fn letter(kind: Option<Kind>) -> char {
     match kind {
         Some(Kind::Added) => 'A',
@@ -360,15 +416,94 @@ fn conflict_code(c: Conflict) -> (char, char) {
     }
 }
 
-fn short_rows(entries: &[StatusEntry], format: Format) -> Vec<Row> {
+/// The renames (and copies, with `status.renames=copies`) among the staged changes and among the work tree's.
+struct Moves {
+    staged: rename::Detected,
+    unstaged: rename::Detected,
+}
+
+fn status_moves(git: &GitHome, status: &pyn_gitwork::Status) -> Result<Moves> {
+    let defaults = git.rename_settings("status");
+    let Ok(Some(opts)) = rename::Request::default().resolve(defaults) else {
+        return Ok(Moves {
+            staged: rename::Detected::default(),
+            unstaged: rename::Detected::default(),
+        });
+    };
+    let repo = &git.repo;
+    let added = |k: Option<Kind>| k == Some(Kind::Added);
+    let (mut old, mut new) = (Tree::new(), Tree::new());
+    let (mut old_wt, mut new_wt) = (Tree::new(), Tree::new());
+    if !status
+        .entries
+        .iter()
+        .any(|e| added(e.staged) || added(e.unstaged))
+    {
+        return Ok(Moves {
+            staged: rename::Detected::default(),
+            unstaged: rename::Detected::default(),
+        });
+    }
+    let tree = match status.head.id() {
+        Some(id) => Some(repo.commit(&id)?.tree),
+        None => None,
+    };
+    let committed = repo.flatten(tree.as_ref(), &Pathspec::default())?;
+    let staged = repo.index_leaves(&repo.read_index()?);
+    for e in status.entries.iter().filter(|e| e.staged.is_some()) {
+        let name = path_string(&e.path);
+        if let Some(b) = committed.get(&e.path).and_then(entry_blob) {
+            old.insert(name.clone(), b);
+        }
+        if let Some(b) = staged.get(&e.path).and_then(entry_blob) {
+            new.insert(name, b);
+        }
+    }
+    if status.entries.iter().any(|e| added(e.unstaged)) {
+        let modules = repo.submodules();
+        let worked =
+            |k: Option<Kind>| matches!(k, Some(Kind::Added | Kind::Deleted | Kind::Modified));
+        for e in status.entries.iter().filter(|e| worked(e.unstaged)) {
+            let name = path_string(&e.path);
+            if let Some(b) = staged.get(&e.path).and_then(entry_blob) {
+                old_wt.insert(name.clone(), b);
+            }
+            if let Some(b) = disk_blob(git, &modules, &e.path, staged.get(&e.path))? {
+                new_wt.insert(name, b);
+            }
+        }
+    }
+    Ok(Moves {
+        staged: rename::detect(git, &old, &new, &opts)?,
+        unstaged: rename::detect(git, &old_wt, &new_wt, &opts)?,
+    })
+}
+
+fn short_rows(entries: &[StatusEntry], format: Format, moves: &Moves) -> Vec<Row> {
     let mut rows = Vec::new();
     for e in entries {
+        let mut e = e.clone();
+        let name = path_string(&e.path);
+        if moves.staged.consumed.contains(&name) {
+            e.staged = None;
+        }
+        if moves.unstaged.consumed.contains(&name) {
+            e.unstaged = None;
+        }
+        if e.staged.is_none() && e.unstaged.is_none() && e.conflict.is_none() {
+            continue;
+        }
+        let (staged_move, unstaged_move) = (
+            moves.staged.moved.get(&name),
+            moves.unstaged.moved.get(&name),
+        );
         if let Some(c) = e.conflict {
             let (x, y) = conflict_code(c);
             rows.push(Row {
                 x,
                 y,
                 path: e.path.clone(),
+                from: None,
             });
         } else if e.unstaged == Some(Kind::Untracked) {
             if e.staged.is_some() {
@@ -376,12 +511,16 @@ fn short_rows(entries: &[StatusEntry], format: Format) -> Vec<Row> {
                     x: letter(e.staged),
                     y: ' ',
                     path: e.path.clone(),
+                    from: None,
                 });
             }
             rows.push(Row::untracked(e.path.clone()));
         } else {
             rows.push(Row {
-                x: letter(e.staged),
+                x: match staged_move {
+                    Some(m) => move_letter(m),
+                    None => letter(e.staged),
+                },
                 y: match e.submodule {
                     Some(s) if format == Format::Short && !s.new_commits => {
                         if s.modified {
@@ -390,9 +529,12 @@ fn short_rows(entries: &[StatusEntry], format: Format) -> Vec<Row> {
                             '?'
                         }
                     }
-                    _ => letter(e.unstaged),
+                    _ => unstaged_move.map_or_else(|| letter(e.unstaged), move_letter),
                 },
                 path: e.path.clone(),
+                from: staged_move
+                    .or(unstaged_move)
+                    .map(|m| m.src.clone().into_bytes()),
             });
         }
     }
@@ -539,19 +681,21 @@ fn filter_gitlinks(modules: &Submodules<'_>, old: &mut Tree, new: &mut Tree) -> 
     Ok(())
 }
 
-/// A `a..b` pair, or a leading revision followed by paths; a name that is both a revision and a file is refused.
+/// Up to `max` revisions (an `a..b` pair when `max` is 2), then paths; a name that is both a revision and a file is refused.
 fn split_revisions(
     git: &GitHome,
     cwd: &Path,
     args: &[String],
     separated: bool,
+    max: usize,
 ) -> Result<(Vec<ObjectId>, Vec<String>)> {
     let mut revs: Vec<ObjectId> = Vec::new();
     let mut rest = args;
-    while revs.len() < 2
+    while revs.len() < max
         && let Some((first, tail)) = rest.split_first()
     {
         if let Some((a, b)) = first.split_once("..")
+            && max == 2
             && !b.starts_with('.')
             && revs.is_empty()
         {
@@ -619,7 +763,7 @@ fn diff(
     cached: bool,
 ) -> Result<bool> {
     let separated = !paths.is_empty() || std::env::args_os().any(|a| a == "--");
-    let (revs, loose) = split_revisions(git, cwd, args, separated)?;
+    let (revs, loose) = split_revisions(git, cwd, args, separated, 2)?;
     check_loose(cwd, &loose, separated)?;
     let only = repo_paths(git, cwd, &[loose.as_slice(), paths].concat())?;
     let spec = Pathspec::new(only.iter().map(|p| p.as_bytes().to_vec()));
@@ -657,7 +801,10 @@ fn diff(
             let leaves = repo.index_leaves(&index);
             for (path, kind) in repo.unstaged_changes_with_submodules(&index, &modules)? {
                 if !spec.matches(&path)
-                    || !matches!(kind, Kind::Modified | Kind::Deleted | Kind::TypeChange)
+                    || !matches!(
+                        kind,
+                        Kind::Added | Kind::Modified | Kind::Deleted | Kind::TypeChange
+                    )
                 {
                     continue;
                 }
@@ -676,7 +823,17 @@ fn diff(
             let index = repo.read_index()?;
             let leaves = repo.index_leaves(&index);
             let unstaged = repo.unstaged_changes_with_submodules(&index, &modules)?;
-            let paths: BTreeSet<&Vec<u8>> = committed.keys().chain(leaves.keys()).collect();
+            let intent: Vec<&Vec<u8>> = index
+                .entries
+                .iter()
+                .filter(|e| e.intent_to_add)
+                .map(|e| &e.path)
+                .collect();
+            let paths: BTreeSet<&Vec<u8>> = committed
+                .keys()
+                .chain(leaves.keys())
+                .chain(intent)
+                .collect();
             for path in paths.into_iter().filter(|p| spec.matches(p)) {
                 let name = path_string(path);
                 if let Some(b) = committed.get(path).and_then(entry_blob) {
@@ -738,56 +895,83 @@ pub(super) fn head_or_refuse(git: &GitHome) -> Result<ObjectId> {
 
 fn show(
     git: &GitHome,
-    commit: Option<&str>,
-    no_patch: bool,
-    fmt: &FormatArgs,
+    cwd: &Path,
+    (args, paths): (&[String], &[String]),
+    (no_patch, first_parent, merges): (bool, bool, &MergeArgs),
+    (fmt, decorate): (&FormatArgs, &DecorateArgs),
     format: &diff::Format,
 ) -> Result<()> {
     git.repo.validate_diff_ignore_submodules()?;
     let Rendering { pretty, style } = fmt.rendering()?;
-    let id = match commit {
-        Some(c) => git.repo.resolve(c)?,
-        None => head_or_refuse(git)?,
-    };
-    let c = git.repo.commit(&id)?;
-    let names = if pretty.uses_decorations() {
-        super::log::decorations(git)?
-    } else {
-        Decorations::new()
-    };
+    let decorate = decorate.resolve(git, &pretty)?;
+    let plan = merges.plan(git, first_parent, true)?;
+    let separated = !paths.is_empty() || std::env::args_os().any(|a| a == "--");
+    let (mut ids, loose) = split_revisions(git, cwd, args, separated, usize::MAX)?;
+    check_loose(cwd, &loose, separated)?;
+    if ids.is_empty() {
+        ids.push(head_or_refuse(git)?);
+    }
+    let only = repo_paths(git, cwd, &[loose.as_slice(), paths].concat())?;
+    let spec = Pathspec::new(only.iter().map(|p| p.as_bytes().to_vec()));
+    let names = decorate.names(git, pretty.uses_decorations())?;
     let ctx = Context {
         style,
         now: chrono::Utc::now().timestamp(),
         decorations: &names,
     };
-    let mut out = render(&pretty, &ctx, &id, &c);
-    out.push_str(pretty.terminator());
-    if no_patch {
-        emit(&out);
-        return Ok(());
-    }
-    let mut body = String::new();
-    let mut differs = false;
-    if c.parents.len() <= 1 {
-        let old_tree = match c.parents.first() {
-            Some(p) => Some(git.repo.commit(p)?.tree),
-            None => None,
+    let shape = Shape {
+        git,
+        pretty: &pretty,
+        spec: &spec,
+        only: &only,
+        quiet: no_patch,
+    };
+    let mut out = String::new();
+    let mut check = String::new();
+    for id in &ids {
+        let c = git.repo.commit(id)?;
+        let mut against = |parent: Option<ObjectId>| -> Result<Option<Body>> {
+            let old_tree = match parent {
+                Some(p) => Some(git.repo.commit(&p)?.tree),
+                None => None,
+            };
+            let (mut old, mut new) = (Tree::new(), Tree::new());
+            let changes = git
+                .repo
+                .diff_trees(old_tree.as_ref(), Some(&c.tree), &spec)?;
+            add_changes(git, &mut old, &mut new, &changes)?;
+            let mut text = String::new();
+            let differs = diff::compare(git, &old, &new, &only, format, &mut text)?;
+            if no_patch {
+                return Ok(differs.then(|| Body {
+                    text: String::new(),
+                    dashes: false,
+                }));
+            }
+            check.push_str(&text);
+            Ok(diff::has_body(format, differs, &text).then_some(Body {
+                text,
+                dashes: false,
+            }))
         };
-        let (mut old, mut new) = (Tree::new(), Tree::new());
-        let changes =
-            git.repo
-                .diff_trees(old_tree.as_ref(), Some(&c.tree), &Pathspec::default())?;
-        add_changes(git, &mut old, &mut new, &changes)?;
-        differs = diff::compare(git, &old, &new, &[], format, &mut body)?;
-    }
-    if diff::has_body(format, differs, &body) || c.parents.len() > 1 {
-        if pretty.blank_before_diff() {
-            out.push('\n');
+        let segments = shape.segments(&plan, &c, &|| Want::of_format(format), &mut against)?;
+        for seg in segments {
+            if !out.is_empty() && !pretty.terminated() {
+                out.push('\n');
+            }
+            let text = render(&pretty, &ctx, id, &c);
+            let text = if decorate.on() {
+                with_decoration(text, &pretty, names.get(id))
+            } else {
+                text
+            };
+            out.push_str(&with_from(text, &pretty, seg.from.as_ref()));
+            out.push_str(pretty.terminator());
+            out.push_str(&seg.tail);
         }
-        out.push_str(&body);
     }
     emit(&out);
-    diff::exit_if_check_failed(format, &body);
+    diff::exit_if_check_failed(format, &check);
     Ok(())
 }
 

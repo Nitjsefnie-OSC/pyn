@@ -54,6 +54,8 @@ pub struct Row {
     pub x: char,
     pub y: char,
     pub path: Vec<u8>,
+    /// The path a rename or copy came from.
+    pub from: Option<Vec<u8>>,
 }
 
 impl Row {
@@ -62,6 +64,7 @@ impl Row {
             x: '?',
             y: '?',
             path,
+            from: None,
         }
     }
 }
@@ -78,7 +81,7 @@ pub fn require_literal(paths: &[String], exists: impl Fn(&str) -> bool) -> Resul
 }
 
 /// `path` as seen from the folder `prefix` (both from the root, no trailing slash on `prefix`).
-fn relative(prefix: &[u8], path: &[u8]) -> Vec<u8> {
+pub(crate) fn relative(prefix: &[u8], path: &[u8]) -> Vec<u8> {
     let is_dir = path.ends_with(b"/");
     let trimmed = path.strip_suffix(b"/").unwrap_or(path);
     let split = |p: &[u8]| -> Vec<Vec<u8>> {
@@ -165,12 +168,19 @@ pub fn print(
     let (untracked, changed): (Vec<&Row>, Vec<&Row>) =
         rows.iter().partition(|r| r.x == '?' && r.y == '?');
     for r in changed.into_iter().chain(untracked) {
-        let shown = if format == Format::Short {
-            relative(cwd_prefix, &r.path)
-        } else {
-            r.path.clone()
+        let shown = |p: &[u8]| {
+            let p = if format == Format::Short {
+                relative(cwd_prefix, p)
+            } else {
+                p.to_vec()
+            };
+            quote(&p, quote_high)
         };
-        out.push_str(&format!("{}{} {}\n", r.x, r.y, quote(&shown, quote_high)));
+        let name = match &r.from {
+            Some(from) => format!("{} -> {}", shown(from), shown(&r.path)),
+            None => shown(&r.path),
+        };
+        out.push_str(&format!("{}{} {name}\n", r.x, r.y));
     }
     std::io::stdout().write_all(out.as_bytes())?;
     Ok(())

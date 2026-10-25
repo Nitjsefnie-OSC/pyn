@@ -219,6 +219,45 @@ fn start_commit(git: &GitHome, spec: &str) -> Result<ObjectId> {
 }
 
 fn go(git: &GitHome, go: Go) -> Result<()> {
+    go_quietly(git, go, Via::default())
+}
+
+/// How a caller drives a checkout: without chatter, onto a branch another work tree has, with a refusal returned.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Via {
+    pub quiet: bool,
+    pub any_worktree: bool,
+    pub returned: bool,
+}
+
+/// Checks out a branch, else the commit `target` names (detached), as `git checkout [-q] <target> --`.
+pub(super) fn checkout_revision(git: &GitHome, target: &str, via: Via) -> Result<()> {
+    let landing = if git.branch_commit(target)?.is_some() {
+        Landing::Branch(target.to_string())
+    } else if git.repo.resolve(target).is_ok() {
+        Landing::Detach {
+            spec: target.to_string(),
+            explicit: false,
+        }
+    } else {
+        bail!("invalid reference: {target}");
+    };
+    go_quietly(
+        git,
+        Go {
+            landing,
+            force: false,
+        },
+        via,
+    )
+}
+
+fn go_quietly(git: &GitHome, go: Go, via: Via) -> Result<()> {
+    let Via {
+        quiet,
+        any_worktree: ignore_other_worktrees,
+        returned,
+    } = via;
     refuse_in_progress(git)?;
     let head = git.repo.head()?;
     let from = current_label(git)?;
@@ -287,6 +326,7 @@ fn go(git: &GitHome, go: Go) -> Result<()> {
     let same_branch = matches!(&head, Head::Branch { name, .. } if Some(format!("{BRANCHES}{name}")) == branch_ref);
     if let Landing::Branch(name) = &go.landing
         && !same_branch
+        && !ignore_other_worktrees
         && let Some(tree) = git.used_elsewhere(name)?
     {
         bail!(
@@ -301,7 +341,12 @@ fn go(git: &GitHome, go: Go) -> Result<()> {
     );
     let mode = if go.force { Mode::Force } else { Mode::Safe };
     if let Err(blocked) = move_tree(git, &opened, old_tree.as_ref(), new_tree.as_ref(), mode)? {
-        blocked.report("checkout", "switch branches", 1);
+        if !returned {
+            blocked.report("checkout", "switch branches", 1);
+        }
+        blocked.print("checkout", "switch branches");
+        eprintln!("Aborting");
+        bail!("");
     }
     let message = format!("checkout: moving from {from} to {label}");
     match (&branch_ref, &target) {
@@ -329,12 +374,15 @@ fn go(git: &GitHome, go: Go) -> Result<()> {
         (None, Some(id)) => git.set_head(None, id, &message)?,
         (None, None) => unreachable!("a detach has a commit"),
     }
-    if !go.force {
+    if !go.force && !quiet {
         for (letter, path) in local_changes(git)? {
             println!("{letter}\t{}", path_string(&path));
         }
     }
     warn_about_hooks_for(git, &CHECKOUT_HOOKS);
+    if quiet {
+        return Ok(());
+    }
     if let (
         true,
         Landing::Branch(_)
@@ -696,6 +744,33 @@ fn is_path(git: &GitHome, cwd: &Path, name: &str) -> Result<bool> {
         .any(|e| under(&e.path, prefix.as_bytes())))
 }
 
+/// The revision (if the first name is one) and the paths of `checkout -p`.
+fn patch_target(
+    git: &GitHome,
+    cwd: &Path,
+    names: &[String],
+    paths: Vec<String>,
+) -> Result<(Option<String>, Vec<String>)> {
+    let dashes = !paths.is_empty() || std::env::args_os().any(|a| a == "--");
+    let Some(first) = names.first() else {
+        return Ok((None, paths));
+    };
+    if dashes {
+        return Ok((Some(first.clone()), paths));
+    }
+    if git.repo.resolve(first).is_ok() {
+        if is_path(git, cwd, first)? {
+            bail!(
+                "ambiguous argument '{first}': both revision and filename\n\
+                 Use '--' to separate paths from revisions, like this:\n\
+                 'pyn <command> [<revision>...] -- [<file>...]'"
+            );
+        }
+        return Ok((Some(first.clone()), names[1..].to_vec()));
+    }
+    Ok((None, names.to_vec()))
+}
+
 pub fn checkout(git: &GitHome, cwd: &Path, args: CheckoutArgs) -> Result<()> {
     let CheckoutArgs {
         args: names,
@@ -706,7 +781,12 @@ pub fn checkout(git: &GitHome, cwd: &Path, args: CheckoutArgs) -> Result<()> {
         ours,
         theirs,
         yes: _,
+        patch,
     } = args;
+    if patch {
+        let (rev, paths) = patch_target(git, cwd, &names, paths)?;
+        return super::patch_mode::checkout(git, cwd, rev.as_deref(), &paths);
+    }
     let stage = match (ours, theirs) {
         (true, _) => Some(2),
         (_, true) => Some(3),
@@ -826,6 +906,9 @@ pub fn checkout(git: &GitHome, cwd: &Path, args: CheckoutArgs) -> Result<()> {
                 force,
             },
         );
+    }
+    if std::env::args_os().any(|a| a == "--") {
+        bail!("invalid reference: {name}");
     }
     if !detach && is_path(git, cwd, &name)? {
         let n = restore_paths(

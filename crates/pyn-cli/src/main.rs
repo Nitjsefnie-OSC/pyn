@@ -36,6 +36,7 @@ mod mv_plan;
 mod probe;
 mod pyn_server;
 mod quiet;
+mod rename;
 mod repo_tool;
 mod rm_mv;
 mod sanitize;
@@ -152,6 +153,12 @@ enum Command {
     Clean(git_home::CleanArgs),
     /// Search the work tree, the index (--cached) or revisions for a pattern, as `git grep` (a git repository only).
     Grep(git_home::GrepArgs),
+    /// Find the commit that introduced a change by binary search, as `git bisect` (a git repository only).
+    Bisect(git_home::BisectArgs),
+    /// Show what commit last changed each line of a file, as `git blame` (a git repository only).
+    Blame(git_home::BlameArgs),
+    /// Like `blame`, in `git annotate`'s layout (a git repository only).
+    Annotate(git_home::BlameArgs),
     /// Show, check and prune the reflog (a git repository only).
     Reflog(git_home::ReflogArgs),
     /// Reapply the current branch's commits on top of another base (a git repository only).
@@ -210,6 +217,28 @@ enum Command {
         #[arg(long, alias = "staged")]
         cached: bool,
     },
+    /// Print the object ids revisions name, and facts about the repository (a git repository only).
+    RevParse(git_home::RevParseArgs),
+    /// Show the files in the index and the work tree (a git repository only).
+    LsFiles(git_home::LsFilesArgs),
+    /// List the contents of a tree object (a git repository only).
+    LsTree(git_home::LsTreeArgs),
+    /// Show an object's type, size or content (a git repository only).
+    CatFile(git_home::CatFileArgs),
+    /// List the refs and the ids they point at (a git repository only).
+    ShowRef(git_home::ShowRefArgs),
+    /// Summarize the history by author (a git repository only).
+    Shortlog(git_home::ShortlogArgs),
+    /// Name a commit after the nearest tag it descends from (a git repository only).
+    Describe(git_home::DescribeArgs),
+    /// Name a commit relative to the refs that reach it (a git repository only).
+    NameRev(git_home::NameRevArgs),
+    /// Write commits as patch emails (a git repository only).
+    FormatPatch(git_home::FormatPatchArgs),
+    /// Apply a patch to the files and optionally the index (a git repository only).
+    Apply(git_home::ApplyArgs),
+    /// Apply patch emails from a mailbox and commit them (a git repository only).
+    Am(git_home::AmArgs),
     /// Show a commit: its message and what it changed (the newest commit if none is named).
     Show {
         /// Commits (`HEAD`, `HEAD~N`, `HEAD^` or a hash of at least 4 digits), then paths; a git repository takes several.
@@ -220,8 +249,15 @@ enum Command {
         /// Print only the commit, not its diff.
         #[arg(short = 's', long = "no-patch")]
         no_patch: bool,
+        /// Diff a merge against its first parent unless an option says otherwise.
+        #[arg(long)]
+        first_parent: bool,
+        #[command(flatten)]
+        merges: git_home::MergeArgs,
         #[command(flatten)]
         fmt: commit_format::FormatArgs,
+        #[command(flatten)]
+        decorate: Box<git_home::DecorateArgs>,
         #[command(flatten)]
         format: DiffFormat,
     },
@@ -287,8 +323,14 @@ enum Command {
         #[arg(short, long)]
         force: bool,
         /// Choose the hunks to stage, one at a time (a git repository only).
-        #[arg(short, long, conflicts_with = "dry_run")]
+        #[arg(short, long)]
         patch: bool,
+        /// Choose what to stage from a menu (a git repository only).
+        #[arg(short, long)]
+        interactive: bool,
+        /// Record new files as to be added later, with empty content in the index (a git repository only).
+        #[arg(short = 'N', long)]
+        intent_to_add: bool,
     },
     /// Remove files from the work tree and stage the removal (`--cached` keeps the files). Exclusive paths need your lock.
     Rm(rm_mv::RmArgs),
@@ -464,9 +506,14 @@ struct DiffFormat {
     /// Show only the names of changed files.
     #[arg(long, conflicts_with = "name_status")]
     name_only: bool,
-    /// Show the names and the kind of change (A, M, D) of changed files.
+    /// Show the names and the kind of change (A, M, D, and R or C with a similarity) of changed files.
     #[arg(long)]
     name_status: bool,
+    /// Show creations, deletions, renames and mode changes.
+    #[arg(long, conflicts_with = "check")]
+    summary: bool,
+    #[command(flatten)]
+    renames: rename::Flags,
 }
 
 impl DiffFormat {
@@ -483,6 +530,8 @@ impl DiffFormat {
             diff::Kind::NameOnly
         } else if self.name_status {
             diff::Kind::NameStatus
+        } else if self.summary {
+            diff::Kind::Summary
         } else {
             diff::Kind::Patch
         };
@@ -490,6 +539,9 @@ impl DiffFormat {
             context: self.context,
             kind,
             ignore_ws: self.ignore_all_space,
+            renames: self.renames.request(),
+            summary: self.summary,
+            kept: Vec::new(),
         }
     }
 }
@@ -859,9 +911,9 @@ fn main() {
         eprintln!("fatal: not a git repository (or any of the parent directories): .git");
         std::process::exit(128);
     }
-    let cli = match Cli::try_parse_from(attached_gpg_keys(attached_pull_rebase(
-        std::env::args_os().collect(),
-    ))) {
+    let cli = match Cli::try_parse_from(attached_gpg_keys(attached_pull_rebase(counted_log(
+        numbered_commits(rename::attached(std::env::args_os().collect())),
+    )))) {
         Ok(cli) => cli,
         Err(e) => {
             let code = match (e.use_stderr(), fatal_option_error(&e)) {
@@ -878,6 +930,7 @@ fn main() {
         update: false,
         all: false,
         patch: false,
+        interactive: false,
         ..
     } = &cli.command
         && paths.is_empty()
@@ -963,6 +1016,58 @@ fn in_git_home() -> bool {
         .is_some()
 }
 
+/// Rewrites `format-patch -<n>` to `--count=<n>`, since a number is not a clap flag name.
+fn numbered_commits(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let Some(at) = args.iter().skip(1).position(|a| a == "format-patch") else {
+        return args;
+    };
+    let mut seen_dashes = false;
+    args.into_iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let text = a.to_string_lossy();
+            seen_dashes |= i > at + 1 && text == "--";
+            match text.strip_prefix('-') {
+                Some(n)
+                    if i > at + 1
+                        && !seen_dashes
+                        && !n.is_empty()
+                        && n.bytes().all(|b| b.is_ascii_digit()) =>
+                {
+                    format!("--count={n}").into()
+                }
+                _ => a,
+            }
+        })
+        .collect()
+}
+
+/// Rewrites `log -<n>` to `--max-count=<n>`; clap has no option named by digits.
+fn counted_log(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let Some(at) = args
+        .iter()
+        .skip(1)
+        .position(|a| a == "log" || a == "history")
+        .map(|i| i + 1)
+    else {
+        return args;
+    };
+    let mut ended = false;
+    let rewritten = args.iter().enumerate().map(|(i, arg)| {
+        let text = arg.to_string_lossy();
+        ended |= i > at && text == "--";
+        match text.strip_prefix('-') {
+            Some(n)
+                if i > at && !ended && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                format!("--max-count={n}").into()
+            }
+            _ => arg.clone(),
+        }
+    });
+    rewritten.collect()
+}
+
 /// Rewrites `pull -r<mode>` to `--rebase=<mode>`; clap takes an optional value only after `=`.
 fn attached_pull_rebase(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
     let Some(at) = args.iter().skip(1).position(|a| a == "pull").map(|i| i + 1) else {
@@ -992,7 +1097,15 @@ fn attached_pull_rebase(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString
 
 /// Rewrites `-S<keyid>` to `--gpg-sign=<keyid>` on the commands that sign; clap takes an optional value only after `=`.
 fn attached_gpg_keys(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
-    const SIGNING: [&str; 6] = ["commit", "merge", "pull", "cherry-pick", "revert", "rebase"];
+    const SIGNING: [&str; 7] = [
+        "commit",
+        "merge",
+        "pull",
+        "cherry-pick",
+        "revert",
+        "rebase",
+        "am",
+    ];
     let Some((at, valued)) = args.iter().enumerate().skip(1).find_map(|(i, a)| {
         let name = SIGNING.iter().find(|n| a == **n)?;
         let valued: &[&str] = match *name {
@@ -1015,6 +1128,15 @@ fn attached_gpg_keys(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
                 "--onto",
                 "--strategy",
                 "--strategy-option",
+            ],
+            "am" => &[
+                "-p",
+                "--directory",
+                "--whitespace",
+                "-C",
+                "--patch-format",
+                "--exclude",
+                "--include",
             ],
             _ => &["-m", "--mainline", "-X", "--strategy-option", "--strategy"],
         };
@@ -1209,6 +1331,12 @@ fn run(cli: Cli) -> Result<()> {
         && let Some(text) = opts.server_message(message)?
     {
         *message = vec![text];
+    }
+    if let Command::Log { git: opts, .. } = &cli.command
+        && git.is_some()
+        && let Some(why) = opts.refused()
+    {
+        usage_error(&format!("`pyn log {why}"));
     }
     if let Command::Log {
         git: opts, path, ..
@@ -1729,9 +1857,32 @@ fn run(cli: Cli) -> Result<()> {
             eprintln!("{}", unsupported::message("grep"));
             std::process::exit(1);
         }
+        Command::Blame(_) => {
+            eprintln!("{}", unsupported::message("blame"));
+            std::process::exit(1);
+        }
+        Command::Annotate(_) => {
+            eprintln!("{}", unsupported::message("annotate"));
+            std::process::exit(1);
+        }
         Command::Reflog(_) => {
             eprintln!("{}", unsupported::message("reflog"));
             std::process::exit(1);
+        }
+        Command::RevParse(_)
+        | Command::LsFiles(_)
+        | Command::LsTree(_)
+        | Command::CatFile(_)
+        | Command::ShowRef(_)
+        | Command::Shortlog(_)
+        | Command::Describe(_)
+        | Command::NameRev(_)
+        | Command::Bisect(_)
+        | Command::FormatPatch(_)
+        | Command::Apply(_)
+        | Command::Am(_) => {
+            eprintln!("fatal: not a git repository (or any of the parent directories): .git");
+            std::process::exit(128);
         }
         Command::Rebase(args) => {
             if ws.as_ref().is_some_and(|w| w.settings().local_store_on()) {
@@ -1814,10 +1965,19 @@ fn run(cli: Cli) -> Result<()> {
             paths,
             no_patch,
             fmt,
+            decorate,
             format,
+            first_parent,
+            merges,
         } => {
             if args.len() > 1 || !paths.is_empty() {
                 usage_error("`pyn show` takes one commit and no paths on a pyn server");
+            }
+            if let Some(flag) = merges.given().or(first_parent.then_some("--first-parent")) {
+                usage_error(&format!("`pyn show {flag}` needs a git repository"));
+            }
+            if let Some((flag, _)) = decorate.given().into_iter().find(|(_, on)| *on) {
+                usage_error(&format!("`pyn show {flag}` needs a git repository"));
             }
             let commit = args.first();
             let shown = ShowOpts {
@@ -1891,6 +2051,15 @@ fn run(cli: Cli) -> Result<()> {
         Command::Add { patch: true, .. } => {
             usage_error("`add --patch` needs a git repository; a pyn server stages whole files")
         }
+        Command::Add {
+            interactive: true, ..
+        } => usage_error(
+            "`add --interactive` needs a git repository; a pyn server stages whole files",
+        ),
+        Command::Add {
+            intent_to_add: true,
+            ..
+        } => usage_error("`add --intent-to-add` needs a git repository"),
         Command::Add {
             paths,
             update,
@@ -2570,7 +2739,7 @@ fn commit_sections(
         Some(store) => local_view::commit_trees(store, c)?,
         None => server_trees(backend, c)?,
     };
-    diff::sections(backend, &old, &new, &only, parts)
+    diff::sections(backend, &old, &new, (&only, &[]), parts)
 }
 
 /// The trees before and after a published commit (against its first parent) and the paths it changed.

@@ -5,14 +5,18 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 use chrono::Local;
-use pyn_gitwork::{Head, Pathspec, fs_path};
+use pyn_gitwork::{Pathspec, fs_path};
 use pyn_object::{Commit, ObjectId};
 use regex::Regex;
 
 use super::GitHome;
 use super::commands::{add_changes, emit, head_or_refuse, message_lines};
-use super::log_match::{compile, parse_date};
-use crate::commit_format::{Context, Decorations, FormatArgs, Pretty, Rendering, render};
+use super::decorate::{DecorateArgs, with_decoration};
+use super::log_gate::{Gate, Pickaxe};
+use super::log_graph::{Graph, topo_order};
+use super::log_match::{Dialect, compile_as, compile_ere, parse_date};
+use super::merge_diff::{Body, MergeArgs, Plan, Shape, Want, with_from};
+use crate::commit_format::{Context, FormatArgs, Pretty, Rendering, render};
 use crate::diff::{self, DiffParts, Kind, Tree};
 use crate::{table, time};
 
@@ -27,6 +31,20 @@ pub struct GitLogArgs {
     dashed: Vec<String>,
     #[command(flatten)]
     fmt: FormatArgs,
+    #[command(flatten)]
+    renames: crate::rename::Flags,
+    /// Read the patterns of `--author`, `--committer` and `--grep` as extended regular expressions.
+    #[arg(short = 'E', long, overrides_with_all = ["fixed_strings", "basic_regexp", "perl_regexp"])]
+    extended_regexp: bool,
+    /// Read them as fixed strings.
+    #[arg(short = 'F', long, overrides_with_all = ["extended_regexp", "basic_regexp", "perl_regexp"])]
+    fixed_strings: bool,
+    /// Read them as basic regular expressions (the default).
+    #[arg(long, overrides_with_all = ["extended_regexp", "fixed_strings", "perl_regexp"])]
+    basic_regexp: bool,
+    /// Read them as Perl-compatible regular expressions (refused: no such engine is built in).
+    #[arg(short = 'P', long, overrides_with_all = ["extended_regexp", "fixed_strings", "basic_regexp"])]
+    perl_regexp: bool,
     /// Only commits whose author matches the regular expression; repeat for any of several.
     #[arg(long, value_name = "PATTERN")]
     author: Vec<String>,
@@ -63,6 +81,28 @@ pub struct GitLogArgs {
     /// Print the selected commits oldest first.
     #[arg(long)]
     reverse: bool,
+    /// Only commits that change the number of occurrences of this text.
+    #[arg(short = 'S', value_name = "STRING")]
+    pickaxe_text: Option<String>,
+    /// Only commits with a changed line that matches the regular expression.
+    #[arg(short = 'G', value_name = "REGEX")]
+    pickaxe_lines: Option<String>,
+    /// Follow the history of the one path through renames.
+    #[arg(long)]
+    follow: bool,
+    /// Draw the history as a graph in front of each line.
+    #[arg(long)]
+    graph: bool,
+    /// Start from `HEAD` and every ref.
+    #[arg(long)]
+    all: bool,
+    /// Follow only the first parent of each commit.
+    #[arg(long)]
+    first_parent: bool,
+    #[command(flatten)]
+    decorate: Box<DecorateArgs>,
+    #[command(flatten)]
+    merge_diff: MergeArgs,
     /// A diffstat after each commit.
     #[arg(long, conflicts_with_all = ["shortstat", "name_only", "name_status"])]
     stat: bool,
@@ -72,6 +112,9 @@ pub struct GitLogArgs {
     /// The names of the changed files.
     #[arg(long, conflicts_with_all = ["name_status", "patch", "unified"])]
     name_only: bool,
+    /// Show creations, deletions, renames and mode changes.
+    #[arg(long)]
+    summary: bool,
     /// The names and the kind of change (A, M, D) of the changed files.
     #[arg(long, conflicts_with_all = ["patch", "unified"])]
     name_status: bool,
@@ -101,8 +144,26 @@ impl GitLogArgs {
             ("--merges", self.merges),
             ("--skip", self.skip.is_some()),
             ("--reverse", self.reverse),
+            ("--all", self.all),
+            ("--first-parent", self.first_parent),
+            ("--graph", self.graph),
+            ("--follow", self.follow),
+            ("-S", self.pickaxe_text.is_some()),
+            ("-G", self.pickaxe_lines.is_some()),
+            ("-E", self.extended_regexp),
+            ("-F", self.fixed_strings),
+            ("--basic-regexp", self.basic_regexp),
+            ("-P", self.perl_regexp),
         ];
-        flags.into_iter().find(|(_, on)| *on).map(|(f, _)| f)
+        flags
+            .into_iter()
+            .chain(self.decorate.given())
+            .chain([(
+                self.merge_diff.given().unwrap_or(""),
+                self.merge_diff.given().is_some(),
+            )])
+            .find(|(_, on)| *on)
+            .map(|(f, _)| f)
     }
 
     /// The first argument given that a pyn server's commit filters cannot take.
@@ -116,6 +177,16 @@ impl GitLogArgs {
             ("--merges", self.merges),
             ("--skip", self.skip.is_some()),
             ("--reverse", self.reverse),
+            ("--all", self.all),
+            ("--first-parent", self.first_parent),
+            ("--graph", self.graph),
+            ("--follow", self.follow),
+            ("-S", self.pickaxe_text.is_some()),
+            ("-G", self.pickaxe_lines.is_some()),
+            ("-E", self.extended_regexp),
+            ("-F", self.fixed_strings),
+            ("--basic-regexp", self.basic_regexp),
+            ("-P", self.perl_regexp),
             ("--author given more than once", self.author.len() > 1),
             ("--grep given more than once", self.grep.len() > 1),
             ("--author with a regular expression", literal(&self.author)),
@@ -124,6 +195,11 @@ impl GitLogArgs {
         ];
         flags
             .into_iter()
+            .chain(self.decorate.given())
+            .chain([(
+                self.merge_diff.given().unwrap_or(""),
+                self.merge_diff.given().is_some(),
+            )])
             .find(|(_, on)| *on)
             .map(|(f, _)| f.to_string())
     }
@@ -235,7 +311,13 @@ fn in_head(git: &GitHome, rel: &str) -> Result<bool> {
 }
 
 /// Revisions up to the first argument that is not one, then paths; `--` ends the revisions explicitly.
-fn select(git: &GitHome, cwd: &Path, args: Vec<String>, dashed: Vec<String>) -> Result<Selection> {
+fn select(
+    git: &GitHome,
+    cwd: &Path,
+    args: Vec<String>,
+    dashed: Vec<String>,
+    all: bool,
+) -> Result<Selection> {
     let explicit = !dashed.is_empty();
     let mut revs = Vec::new();
     let mut paths = Vec::new();
@@ -285,7 +367,9 @@ fn select(git: &GitHome, cwd: &Path, args: Vec<String>, dashed: Vec<String>) -> 
             }
         }
     }
-    if !given {
+    if all {
+        include.extend(all_tips(git)?);
+    } else if !given {
         include.push(head_or_refuse(git)?);
     }
     let paths = paths
@@ -313,7 +397,10 @@ struct Filters {
 impl Filters {
     fn new(a: &GitLogArgs) -> Result<Self> {
         let all = |patterns: &[String]| -> Result<Vec<Regex>> {
-            patterns.iter().map(|p| compile(p, a.ignore_case)).collect()
+            patterns
+                .iter()
+                .map(|p| compile_as(p, a.ignore_case, a.dialect()))
+                .collect()
         };
         let now = Local::now();
         let date = |d: &Option<String>| d.as_deref().map(|d| parse_date(d, now)).transpose();
@@ -371,6 +458,8 @@ impl Filters {
 impl GitLogArgs {
     pub fn diff_parts(&self) -> DiffParts {
         DiffParts {
+            renames: self.renames.request(),
+            summary: self.summary,
             names: if self.name_only {
                 Some(Kind::NameOnly)
             } else if self.name_status {
@@ -386,64 +475,98 @@ impl GitLogArgs {
     }
 }
 
-/// The diff of a non-merge commit against its parent, limited to `spec`; merges show none, as in git.
-fn diff_body(
-    git: &GitHome,
-    c: &Commit,
-    spec: &Pathspec,
-    parts: &DiffParts,
-) -> Result<Option<(String, bool)>> {
-    if c.parents.len() > 1 {
-        return Ok(None);
+/// Every ref that names a commit, in ref order, then `HEAD`.
+fn all_tips(git: &GitHome) -> Result<Vec<ObjectId>> {
+    let mut tips = Vec::new();
+    for (name, _) in git.repo.refs().list("refs/")? {
+        tips.extend(git.repo.resolve(&name).ok());
     }
-    let parent_tree = match c.parents.first() {
-        Some(p) => Some(git.repo.commit(p)?.tree),
-        None => None,
-    };
-    let (mut old, mut new) = (Tree::new(), Tree::new());
-    let changes = git
-        .repo
-        .diff_trees(parent_tree.as_ref(), Some(&c.tree), spec)?;
-    add_changes(git, &mut old, &mut new, &changes)?;
-    diff::sections(git, &old, &new, &[], parts)
+    tips.extend(git.repo.head()?.id());
+    Ok(tips)
 }
 
-pub(super) fn decorations(git: &GitHome) -> Result<Decorations> {
-    let head = git.repo.head()?;
-    let current = match &head {
-        Head::Branch { name, .. } => Some(format!("refs/heads/{name}")),
-        Head::Detached(_) => None,
-    };
-    let mut map = Decorations::new();
-    let mut listed = git.repo.refs().list("refs/")?;
-    listed.reverse();
-    for (name, _) in listed {
-        if current.as_deref() == Some(name.as_str()) {
-            continue;
-        }
-        let Ok(id) = git.repo.resolve(&name) else {
-            continue;
-        };
-        let label = if let Some(b) = name.strip_prefix("refs/heads/") {
-            b.to_string()
-        } else if let Some(r) = name.strip_prefix("refs/remotes/") {
-            r.to_string()
-        } else if let Some(t) = name.strip_prefix("refs/tags/") {
-            format!("tag: {t}")
+impl GitLogArgs {
+    fn dialect(&self) -> Dialect {
+        if self.extended_regexp {
+            Dialect::Extended
+        } else if self.fixed_strings {
+            Dialect::Fixed
         } else {
-            name
+            Dialect::Basic
+        }
+    }
+
+    /// The first option combination `pyn log` cannot honor on a git repository.
+    pub fn refused(&self) -> Option<String> {
+        if self.perl_regexp {
+            return Some(
+                "-P` is not available: no Perl-compatible regular expression engine is built in; use -E".into(),
+            );
+        }
+        if self.follow
+            && (self.diff_given()
+                || self.pickaxe_text.is_some()
+                || self.pickaxe_lines.is_some()
+                || self.merge_diff.given().is_some())
+        {
+            return Some(
+                "--follow` does not combine with diff output, merge diff options, -S or -G".into(),
+            );
+        }
+        if let Some(flag) = self.merge_diff.given()
+            && (self.pickaxe_text.is_some() || self.pickaxe_lines.is_some())
+        {
+            return Some(format!("{flag}` does not combine with -S or -G"));
+        }
+        if self.graph {
+            let combined = [
+                ("diff output", self.diff_given()),
+                ("merge diff options", self.merge_diff.given().is_some()),
+                ("--author", !self.author.is_empty()),
+                ("--committer", !self.committer.is_empty()),
+                ("--grep", !self.grep.is_empty()),
+                ("--merges", self.merges),
+                ("--no-merges", self.no_merges),
+                ("--since", self.since.is_some()),
+                ("--until", self.until.is_some()),
+                ("-S", self.pickaxe_text.is_some()),
+                ("-G", self.pickaxe_lines.is_some()),
+                ("--follow", self.follow),
+            ];
+            if let Some((what, _)) = combined.into_iter().find(|(_, on)| *on) {
+                return Some(format!("--graph` does not combine with {what}"));
+            }
+        }
+        None
+    }
+
+    fn gate(&self, paths: &[String], spec: &Pathspec) -> Result<Option<Gate>> {
+        let pick = match (&self.pickaxe_text, &self.pickaxe_lines) {
+            (Some(_), Some(_)) => {
+                bail!("options '-G', '-S', and '--find-object' cannot be used together")
+            }
+            (Some(text), None) => Some(Pickaxe::Text {
+                needle: text.clone().into_bytes(),
+                fold: self.ignore_case,
+            }),
+            (None, Some(re)) => Some(Pickaxe::Lines(compile_ere(re, self.ignore_case)?)),
+            (None, None) => None,
         };
-        map.entry(id).or_default().push(label);
+        let follow = match (self.follow, paths) {
+            (false, _) => None,
+            (true, [one]) => Some(one.clone()),
+            (true, _) => bail!("--follow requires exactly one pathspec"),
+        };
+        if follow.is_none() && pick.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Gate {
+            follow,
+            pick,
+            first_parent: self.first_parent,
+            spec: spec.clone(),
+        }))
     }
-    let first = match (&head, head.id()) {
-        (Head::Branch { name, .. }, Some(id)) => Some((id, format!("HEAD -> {name}"))),
-        (Head::Detached(id), _) => Some((*id, "HEAD".to_string())),
-        _ => None,
-    };
-    if let Some((id, label)) = first {
-        map.entry(id).or_default().insert(0, label);
-    }
-    Ok(map)
 }
 
 pub(super) fn log(
@@ -457,28 +580,84 @@ pub(super) fn log(
     let Rendering { pretty, style } = args.fmt.rendering()?;
     let filters = Filters::new(&args)?;
     let parts = args.diff_parts();
-    let positional: Vec<String> = path.into_iter().chain(args.more.iter().cloned()).collect();
-    let selection = select(git, cwd, positional, args.dashed.clone())?;
-    let spec = Pathspec::new(selection.paths.iter().map(|p| p.as_bytes().to_vec()));
-    let decorated = if pretty.uses_decorations() {
-        decorations(git)?
-    } else {
-        Decorations::new()
+    let patch_parts = DiffParts {
+        patch: true,
+        ..args.diff_parts()
     };
+    let plan = args.merge_diff.plan(git, args.first_parent, false)?;
+    let positional: Vec<String> = path.into_iter().chain(args.more.iter().cloned()).collect();
+    let selection = select(git, cwd, positional, args.dashed.clone(), args.all)?;
+    let decorate = args.decorate.resolve(git, &pretty)?;
+    let spec = Pathspec::new(selection.paths.iter().map(|p| p.as_bytes().to_vec()));
+    let decorated = decorate.names(git, pretty.uses_decorations())?;
     let ctx = Context {
         style,
         now: chrono::Utc::now().timestamp(),
         decorations: &decorated,
     };
 
+    if plan.needs_full_history() && !selection.paths.is_empty() {
+        crate::usage_error(
+            "`pyn log` cannot limit history to paths with `-m` or `--diff-merges` separate or first-parent",
+        );
+    }
+    let gate = args.gate(&selection.paths, &spec)?;
+    let walk_spec = if gate.as_ref().is_some_and(|g| g.follow.is_some()) {
+        Pathspec::default()
+    } else {
+        spec.clone()
+    };
     let mut walk = git
         .repo
-        .log_hiding(&selection.include, selection.hidden, spec.clone())?;
+        .log_hiding(&selection.include, selection.hidden, walk_spec)?;
+    if args.first_parent {
+        walk.first_parent_only();
+    }
+    let mut printer = Printer {
+        git,
+        pretty: &pretty,
+        ctx: &ctx,
+        spec: &spec,
+        parts: &parts,
+        patch_parts: &patch_parts,
+        plan,
+        headers: 0,
+        decorate: decorate.on(),
+        gate,
+        graph: None,
+        missing_newline: false,
+        members: HashSet::new(),
+        shown: 0,
+        out: String::new(),
+    };
     let mut skip = args.skip.unwrap_or(0);
+    if args.graph {
+        if args.reverse {
+            bail!("options '--reverse' and '--graph' cannot be used together");
+        }
+        if !selection.paths.is_empty() {
+            bail!("`pyn log --graph` does not take a path");
+        }
+        let mut list = Vec::new();
+        while let Some(entry) = walk.next_entry()? {
+            list.push(entry);
+        }
+        printer.members = list.iter().map(|e| e.id).collect();
+        printer.graph = Some(Graph::new());
+        for entry in graph_order(list) {
+            if skip > 0 {
+                skip -= 1;
+            } else if limit.is_none_or(|n| printer.shown < n) {
+                printer.print_graph(&entry, args.first_parent)?;
+            } else {
+                break;
+            }
+        }
+        emit(&printer.out);
+        return Ok(());
+    }
     let mut chosen = Vec::new();
-    let mut out = String::new();
-    let mut shown = 0usize;
-    while limit.is_none_or(|n| chosen.len() + shown < n)
+    while limit.is_none_or(|n| chosen.len() + printer.shown < n)
         && let Some(entry) = walk.next_entry()?
     {
         if !filters.accepts(&entry.commit) {
@@ -490,50 +669,194 @@ pub(super) fn log(
         }
         if args.reverse {
             chosen.push(entry);
-            continue;
-        }
-        entry_text(git, &pretty, &ctx, &spec, &parts, shown, &entry, &mut out)?;
-        shown += 1;
-        if out.len() > 64 * 1024 {
-            emit(&std::mem::take(&mut out));
+        } else {
+            printer.print(&entry)?;
         }
     }
     for entry in chosen.iter().rev() {
-        entry_text(git, &pretty, &ctx, &spec, &parts, shown, entry, &mut out)?;
-        shown += 1;
-        if out.len() > 64 * 1024 {
-            emit(&std::mem::take(&mut out));
-        }
+        printer.print(entry)?;
     }
-    emit(&out);
+    emit(&printer.out);
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn entry_text(
-    git: &GitHome,
-    pretty: &Pretty,
-    ctx: &Context<'_>,
-    spec: &Pathspec,
-    parts: &DiffParts,
-    index: usize,
-    entry: &pyn_gitwork::LogEntry,
-    out: &mut String,
-) -> Result<()> {
-    if index > 0 && !pretty.terminated() {
-        out.push('\n');
-    }
-    out.push_str(&render(pretty, ctx, &entry.id, &entry.commit));
-    out.push_str(pretty.terminator());
-    if parts.any()
-        && let Some((body, dashes)) = diff_body(git, &entry.commit, spec, parts)?
-    {
-        if pretty.blank_before_diff() {
-            out.push_str(if dashes { "---\n" } else { "\n" });
+struct Printer<'a> {
+    git: &'a GitHome,
+    pretty: &'a Pretty,
+    ctx: &'a Context<'a>,
+    spec: &'a Pathspec,
+    parts: &'a DiffParts,
+    patch_parts: &'a DiffParts,
+    plan: Plan,
+    headers: usize,
+    decorate: bool,
+    gate: Option<Gate>,
+    graph: Option<Graph>,
+    missing_newline: bool,
+    members: HashSet<ObjectId>,
+    shown: usize,
+    out: String,
+}
+
+/// The entries in the topological order `--graph` implies.
+fn graph_order(list: Vec<pyn_gitwork::LogEntry>) -> Vec<pyn_gitwork::LogEntry> {
+    let ids: Vec<ObjectId> = list.iter().map(|e| e.id).collect();
+    let parents = list
+        .iter()
+        .map(|e| (e.id, e.commit.parents.clone()))
+        .collect();
+    let mut by_id: std::collections::HashMap<ObjectId, pyn_gitwork::LogEntry> =
+        list.into_iter().map(|e| (e.id, e)).collect();
+    topo_order(&ids, &parents)
+        .into_iter()
+        .filter_map(|id| by_id.remove(&id))
+        .collect()
+}
+
+impl Printer<'_> {
+    /// The text of `entry` with a graph in front of every line, assembled as git's `show_log` does.
+    fn print_graph(&mut self, entry: &pyn_gitwork::LogEntry, first_parent: bool) -> Result<()> {
+        let graph = self.graph.as_mut().expect("graph mode has a graph");
+        let all = &entry.commit.parents;
+        let shown: Vec<ObjectId> = if first_parent {
+            all.iter()
+                .take(1)
+                .filter(|p| self.members.contains(*p))
+                .copied()
+                .collect()
+        } else {
+            all.iter()
+                .filter(|p| self.members.contains(*p))
+                .copied()
+                .collect()
+        };
+        graph.update(entry.id, shown);
+        let out = &mut self.out;
+        if self.shown > 0 && !self.pretty.terminated() {
+            if !self.missing_newline {
+                graph.show_padding(out);
+            }
+            out.push('\n');
         }
-        out.push_str(&body);
+        graph.show_commit(out);
+        let text = render(self.pretty, self.ctx, &entry.id, &entry.commit);
+        let names = self
+            .ctx
+            .decorations
+            .get(&entry.id)
+            .filter(|_| self.decorate);
+        let names = names
+            .map(|n| format!(" ({})", n.join(", ")))
+            .unwrap_or_default();
+        let message = match self.pretty {
+            Pretty::User { .. } => text,
+            Pretty::Oneline { .. } => {
+                let (id, rest) = text.split_once(' ').unwrap_or((&text, ""));
+                out.push_str(&format!("{id}{names} "));
+                rest.to_string()
+            }
+            _ => {
+                let (head, rest) = text.split_once('\n').unwrap_or((&text, ""));
+                out.push_str(&format!("{head}{names}\n"));
+                graph.show_oneline(out);
+                rest.to_string()
+            }
+        };
+        let mut lines = message.split_inclusive('\n').peekable();
+        while let Some(line) = lines.next() {
+            out.push_str(line);
+            if line.ends_with('\n') && lines.peek().is_some() {
+                graph.show_oneline(out);
+            }
+        }
+        let terminated = message.ends_with('\n');
+        if !graph.is_finished() {
+            if !terminated {
+                out.push('\n');
+            }
+            graph.show_remainder(out);
+            if terminated {
+                out.push('\n');
+            }
+        }
+        self.missing_newline = !terminated;
+        if self.pretty.terminator() == "\n" {
+            if !self.missing_newline {
+                graph.show_padding(out);
+            }
+            out.push('\n');
+        }
+        self.shown += 1;
+        if self.out.len() > 64 * 1024 {
+            emit(&std::mem::take(&mut self.out));
+        }
+        Ok(())
     }
-    Ok(())
+
+    /// Adds the entry's text unless the gate drops the commit.
+    fn print(&mut self, entry: &pyn_gitwork::LogEntry) -> Result<()> {
+        let only = match &mut self.gate {
+            Some(gate) => match gate.keeps(self.git, &entry.id)? {
+                Some(only) => only,
+                None => return Ok(()),
+            },
+            None => Vec::new(),
+        };
+        let c = &entry.commit;
+        let asked = self.parts.any();
+        let segments = if self.plan.diffs(c.parents.len() > 1, asked) {
+            let parts = if asked { self.parts } else { self.patch_parts };
+            let git = self.git;
+            let spec = self.spec;
+            let shape = Shape {
+                git,
+                pretty: self.pretty,
+                spec,
+                only: &[],
+                quiet: false,
+            };
+            let mut against = |parent: Option<ObjectId>| -> Result<Option<Body>> {
+                let parent_tree = match parent {
+                    Some(p) => Some(git.repo.commit(&p)?.tree),
+                    None => None,
+                };
+                let (mut old, mut new) = (Tree::new(), Tree::new());
+                let changes = git
+                    .repo
+                    .diff_trees(parent_tree.as_ref(), Some(&c.tree), spec)?;
+                add_changes(git, &mut old, &mut new, &changes)?;
+                Ok(diff::sections(git, &old, &new, (&[], &only), parts)?
+                    .map(|(text, dashes)| Body { text, dashes }))
+            };
+            shape.segments(&self.plan, c, &|| Want::of_parts(parts), &mut against)?
+        } else {
+            vec![super::merge_diff::Segment {
+                from: None,
+                tail: String::new(),
+            }]
+        };
+        for seg in segments {
+            if self.headers > 0 && !self.pretty.terminated() {
+                self.out.push('\n');
+            }
+            let text = render(self.pretty, self.ctx, &entry.id, c);
+            let text = if self.decorate {
+                with_decoration(text, self.pretty, self.ctx.decorations.get(&entry.id))
+            } else {
+                text
+            };
+            self.out
+                .push_str(&with_from(text, self.pretty, seg.from.as_ref()));
+            self.out.push_str(self.pretty.terminator());
+            self.out.push_str(&seg.tail);
+            self.headers += 1;
+        }
+        self.shown += 1;
+        if self.out.len() > 64 * 1024 {
+            emit(&std::mem::take(&mut self.out));
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn log_table(git: &GitHome, limit: usize) -> Result<()> {

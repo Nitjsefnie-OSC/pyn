@@ -1,29 +1,58 @@
 //! The backend for a repository that lives in git: a real `.git` read through `pyn-gitwork`, never written.
 //! Nothing here changes what git sees; the only file pyn adds is its own `.pyn/` folder, hidden by `info/exclude`.
 
+mod add_interactive;
+mod am;
+mod am_3way;
+mod am_mail;
 mod ancestry;
+mod apply;
+mod apply_hunk;
+mod apply_parse;
+mod apply_ws;
+mod bisect;
+mod bisect_bases;
+mod bisect_walk;
+mod blame;
+mod blame_format;
+mod blame_range;
+mod blame_rename;
+mod blame_walk;
+mod blame_xdiff;
 mod branches;
+mod cat_file;
 mod clean;
 mod clean_menu;
 mod clone;
+mod combined_diff;
 mod commands;
 mod commit;
 mod convert;
+mod decorate;
+mod describe;
 pub(crate) mod editor;
 mod fetch;
 mod fetch_apply;
 mod fetch_map;
+mod format_patch;
 mod grep;
 mod grep_regex;
 mod hunk_pick;
 mod init_git;
 mod log;
+mod log_gate;
+mod log_graph;
 mod log_match;
+mod ls_files;
+mod ls_tree;
 pub(crate) mod meld;
 mod merge;
+mod merge_diff;
+mod name_rev;
 mod patch_file;
 mod patch_mode;
 mod pick;
+mod plumbing;
 mod pull;
 mod push;
 mod push_plan;
@@ -36,7 +65,10 @@ mod remote;
 mod remote_query;
 mod remove;
 mod reset;
+mod rev_parse;
 mod rewrite;
+mod shortlog;
+mod show_ref;
 mod signing;
 mod stage;
 mod stash;
@@ -62,22 +94,37 @@ use crate::backend::Backend;
 use crate::repo_tool::{self, RepoTool};
 use crate::workspace::{self, Workspace};
 
+pub use am::AmArgs;
+pub use apply::ApplyArgs;
+pub use bisect::BisectArgs;
+pub use blame::BlameArgs;
+pub use cat_file::CatFileArgs;
 pub use clean::CleanArgs;
 pub use clone::{CloneOptions, clone};
 pub use commands::run;
 pub use commit::GitCommitArgs;
 pub(crate) use commit::append_trailer;
+pub use decorate::DecorateArgs;
+pub use describe::DescribeArgs;
 pub use fetch::FetchArgs;
+pub use format_patch::FormatPatchArgs;
 pub use grep::GrepArgs;
 pub(crate) use init_git::is_tracked;
 pub use init_git::{InitGitArgs, init_git};
 pub use log::GitLogArgs;
+pub use ls_files::LsFilesArgs;
+pub use ls_tree::LsTreeArgs;
+pub use merge_diff::MergeArgs;
+pub use name_rev::NameRevArgs;
 pub use pull::PullArgs;
 pub use push::PushArgs;
 pub use rebase::RebaseArgs;
 pub use reflog::ReflogArgs;
 pub use remote::{RemoteArgs, on_server as remote_on_server};
 pub use reset::ResetKind;
+pub use rev_parse::RevParseArgs;
+pub use shortlog::ShortlogArgs;
+pub use show_ref::ShowRefArgs;
 pub use signing::SignFlag;
 pub(crate) use stage::clean_message;
 pub use stash::StashArgs;
@@ -253,7 +300,49 @@ impl GitHome {
     }
 }
 
+impl GitHome {
+    /// The rename detection `<scope>.renames` and `<scope>.renameLimit` turn on, falling back to `diff.*`.
+    pub(crate) fn rename_settings(&self, scope: &str) -> crate::rename::Defaults {
+        use crate::rename::{Defaults, Mode};
+        let cfg = self.repo.config();
+        let mode_of = |key: String| -> Option<Option<Mode>> {
+            let v = cfg.get(&key)?.to_ascii_lowercase();
+            Some(if v == "copies" || v == "copy" {
+                Some(Mode::Copies)
+            } else {
+                cfg.get_bool(&key)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false)
+                    .then_some(Mode::Renames)
+            })
+        };
+        let limit_of = |key: String| -> Option<i64> {
+            let v = cfg.get(&key)?.trim().to_ascii_lowercase();
+            let (digits, scale) = match v.chars().last()? {
+                'k' => (&v[..v.len() - 1], 1 << 10),
+                'm' => (&v[..v.len() - 1], 1 << 20),
+                'g' => (&v[..v.len() - 1], 1 << 30),
+                _ => (v.as_str(), 1),
+            };
+            digits.parse::<i64>().ok().map(|n| n * scale)
+        };
+        Defaults {
+            mode: mode_of(format!("{scope}.renames"))
+                .or_else(|| mode_of("diff.renames".into()))
+                .unwrap_or(Some(Mode::Renames)),
+            limit: limit_of(format!("{scope}.renameLimit"))
+                .or_else(|| limit_of("diff.renameLimit".into()))
+                .unwrap_or(crate::rename::DEFAULT_LIMIT as i64),
+        }
+    }
+}
+
 impl Backend for GitHome {
+    fn rename_defaults(&self) -> crate::rename::Defaults {
+        self.rename_settings("diff")
+    }
+
     fn quote_diff_path(&self, path: &[u8]) -> String {
         crate::short_status::quote_diff(path, self.repo.bool_setting("core.quotePath", true))
     }

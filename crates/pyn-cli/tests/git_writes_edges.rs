@@ -537,7 +537,7 @@ fn a_sparse_checkout_is_refused() {
     index.entries[0].skip_worktree = true;
     index.write(&path, Algorithm::Sha1).unwrap();
     let before = snapshot(&repo.main);
-    let (code, err) = repo.fails(&["switch", "clean"]);
+    let (code, err) = repo.fails(&["stash"]);
     assert_eq!(code, 128);
     assert!(err.contains("sparse"), "{err}");
     assert_eq!(snapshot(&repo.main), before);
@@ -871,8 +871,9 @@ fn stash_keeps_ignored_files_and_leaves_nothing_to_stash_alone() {
 }
 
 #[test]
-fn hooks_are_not_run_and_one_warning_names_them() {
+fn hooks_switched_off_are_not_run_and_one_warning_names_them() {
     let repo = Repo::merge("sha1");
+    config_append(&repo, "[pyn]\n\thooks = false\n");
     let hooks = repo.main.join(".git/hooks");
     fs::create_dir_all(&hooks).unwrap();
     fs::write(hooks.join("post-checkout"), "#!/bin/sh\ntouch hook-ran\n").unwrap();

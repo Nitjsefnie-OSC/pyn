@@ -25,12 +25,6 @@ pub(super) const IN_PROGRESS: [&str; 6] = [
     "rebase-apply",
     "sequencer",
 ];
-const HOOKS: [&str; 4] = [
-    "pre-commit",
-    "prepare-commit-msg",
-    "commit-msg",
-    "post-commit",
-];
 
 pub struct AddOptions {
     pub paths: Vec<String>,
@@ -645,8 +639,16 @@ pub fn add(git: &GitHome, cwd: &Path, options: &AddOptions) -> Result<bool> {
     if !options.dry_run && !plan.ops.is_empty() {
         git.save_index(&opened, &index_of(opened.index.version, entries))?;
     }
+    let others: Vec<&[u8]> = plan
+        .ops
+        .keys()
+        .chain(&plan.nested)
+        .map(Vec::as_slice)
+        .collect();
+    let outside = super::sparse::outside_only(&specs.spec, &opened.index, &others);
+    let refused = super::sparse::refuse_outside(&outside);
     if plan.ignored.is_empty() {
-        return Ok(false);
+        return Ok(refused);
     }
     eprintln!("The following paths are ignored by one of your .gitignore files:");
     for path in &plan.ignored {
@@ -703,7 +705,9 @@ pub fn restore_staged(
             IndexEntry::new(path, raw_mode(entry.mode), entry.id),
         );
     }
-    git.save_index(&opened, &index_of(opened.index.version, entries))
+    let mut index = index_of(opened.index.version, entries);
+    super::sparse::carry_over(git, &opened.index, &mut index)?;
+    git.save_index(&opened, &index)
 }
 
 fn write_dir(
@@ -934,17 +938,9 @@ pub(super) fn refuse_states(git: &GitHome, states: &[&str]) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn warn_about_hooks(git: &GitHome) {
-    warn_about_hooks_for(git, &HOOKS);
-}
-
 /// Warns once that git hooks exist and were not run.
 pub(super) fn warn_about_hooks_for(git: &GitHome, names: &[&str]) {
-    let common = git.repo.git().common_dir();
-    let hooks = match git.repo.config().get("core.hookspath") {
-        Some(p) => common.join(p),
-        None => common.join("hooks"),
-    };
+    let hooks = git.hooks_dir();
     if names.iter().any(|h| hooks.join(h).is_file()) {
         eprintln!(
             "warning: pyn does not run git hooks; the ones in {} were skipped",

@@ -135,7 +135,24 @@ fn strict_flag(name: &str, default: bool) -> anyhow::Result<bool> {
     }
 }
 
+/// `PYN_WEBHOOKS_ALLOW_LOOPBACK` is refused unless plain-http development mode is on too.
+fn allow_loopback() -> anyhow::Result<bool> {
+    loopback_mode(
+        strict_flag("PYN_WEBHOOKS_ALLOW_LOOPBACK", false)?,
+        strict_flag("PYN_WEBHOOKS_ALLOW_HTTP", false)?,
+    )
+}
+
+fn loopback_mode(on: bool, allow_http: bool) -> anyhow::Result<bool> {
+    anyhow::ensure!(
+        !on || allow_http,
+        "PYN_WEBHOOKS_ALLOW_LOOPBACK is for development and needs PYN_WEBHOOKS_ALLOW_HTTP=true"
+    );
+    Ok(on)
+}
+
 fn webhook_settings() -> anyhow::Result<WebhookSettings> {
+    allow_loopback()?;
     let secret_key = match std::env::var("PYN_SECRET_KEY") {
         Ok(text) => {
             Some(SecretKey::from_hex(&text).map_err(|e| anyhow::anyhow!("PYN_SECRET_KEY: {e}"))?)
@@ -184,7 +201,13 @@ fn start_webhook_delivery(
         config.concurrency >= 1,
         "PYN_WEBHOOKS_CONCURRENCY must be at least 1"
     );
-    let sender = SafeSender::new(settings.allow_http, allowed_hosts);
+    let mut sender = SafeSender::new(settings.allow_http, allowed_hosts);
+    if allow_loopback()? {
+        tracing::warn!(
+            "PYN_WEBHOOKS_ALLOW_LOOPBACK is on: webhooks may be delivered to loopback addresses; development only"
+        );
+        sender = sender.allowing_loopback();
+    }
     Arc::new(DeliveryWorker::new(
         store,
         clock,
@@ -224,10 +247,44 @@ fn oidc_provider() -> anyhow::Result<Option<Arc<HttpOidcProvider>>> {
     Ok(Some(Arc::new(HttpOidcProvider::new(config)?)))
 }
 
+/// Asks this server's own `/healthz` on the configured address; an unspecified bind address is probed on loopback.
+async fn healthcheck(addr: &str) -> anyhow::Result<()> {
+    let (host, port) = addr
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("PYN_ADDR must be host:port"))?;
+    let host = match host.trim_matches(['[', ']']) {
+        "0.0.0.0" => "127.0.0.1",
+        "::" => "::1",
+        other => other,
+    };
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()?;
+    client
+        .get(format!("http://{host}:{port}/healthz"))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
     let addr = std::env::var("PYN_ADDR").unwrap_or_else(|_| "127.0.0.1:7878".into());
+    if std::env::args().nth(1).as_deref() == Some("--healthcheck") {
+        return healthcheck(&addr).await;
+    }
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
     let rules = match std::env::var("PYN_CONFIG") {
         Ok(path) => {
             let size = std::fs::metadata(&path)?.len();
@@ -476,7 +533,7 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::whole_number;
+    use super::{loopback_mode, whole_number};
 
     #[test]
     fn a_whole_number_parses_including_zero() {
@@ -494,5 +551,12 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn loopback_delivery_needs_the_http_development_mode() {
+        assert!(loopback_mode(true, false).is_err());
+        assert!(loopback_mode(true, true).unwrap());
+        assert!(!loopback_mode(false, false).unwrap());
     }
 }

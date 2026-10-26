@@ -13,9 +13,10 @@ use pyn_core::commit_record::{CommitDraft, TreeChange, TreeEdit, draft_commit};
 use pyn_core::merge::{MergeWrite, MergeWritten};
 use pyn_core::{
     Branch, ChangesetItem, Commit, CommitFilter, EventDraft, FileMode, HeadCounts, HistoryCursor,
-    HistoryScan, Lock, MetadataStore, Mode, ObjectId, PathFilter, Person, PushedCommit, PynError,
-    REPO_ALGORITHM, RepoId, RepoPath, RepoRecord, RepoSettings, RepoUpdate, RepoUsage, Result,
-    Revision, RevisionHash, RevisionId, StorageCap, UploadReservation, Usage, UserId, Visibility,
+    HistoryScan, Lock, LockChange, LockEventBuilder, MetadataStore, Mode, ObjectId, PathFilter,
+    Person, PushedCommit, PynError, REPO_ALGORITHM, RepoId, RepoPath, RepoRecord, RepoSettings,
+    RepoUpdate, RepoUsage, Result, Revision, RevisionHash, RevisionId, StorageCap,
+    UploadReservation, Usage, UserId, Visibility,
 };
 use sqlx::migrate::MigrateDatabase;
 use sqlx::postgres::{PgPoolOptions, PgRow};
@@ -173,7 +174,26 @@ fn repo_from(row: &PgRow) -> Result<RepoRecord> {
     })
 }
 
+/// Removes the lock on `path` and returns it.
+async fn delete_lock(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    repo: &RepoId,
+    path: &str,
+) -> Result<Option<Lock>> {
+    let row = sqlx::query(
+        "DELETE FROM locks WHERE repo = $1 AND path = $2
+         RETURNING path, owner, acquired_at, expires_at",
+    )
+    .bind(repo.as_str())
+    .bind(path)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db)?;
+    row.as_ref().map(lock_from).transpose()
+}
+
 /// Appends the revision inside `tx` if its head, lock and storage checks pass; the caller commits.
+#[allow(clippy::too_many_arguments)]
 async fn append_revision(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     repo: &RepoId,
@@ -182,6 +202,7 @@ async fn append_revision(
     cap: Option<&StorageCap>,
     commit: (u64, ObjectId),
     at_branch: &HashMap<String, i64>,
+    released: &mut Vec<Lock>,
 ) -> Result<Revision> {
     let ChangesetItem {
         revision,
@@ -346,12 +367,7 @@ async fn append_revision(
         }
     }
     if lock_holder.is_some() {
-        sqlx::query("DELETE FROM locks WHERE repo = $1 AND path = $2")
-            .bind(repo.as_str())
-            .bind(path.as_str())
-            .execute(&mut **tx)
-            .await
-            .map_err(db)?;
+        released.extend(delete_lock(tx, repo, path.as_str()).await?);
     }
     Ok(created)
 }
@@ -763,6 +779,22 @@ impl PgMetadataStore {
         self
     }
 
+    async fn queue_checkins(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        events: Option<LockEventBuilder<'_>>,
+        released: &[Lock],
+    ) -> Result<()> {
+        let Some(build) = events else {
+            return Ok(());
+        };
+        let drafts = released
+            .iter()
+            .map(|l| build(LockChange::CheckedIn(l)))
+            .collect::<Result<Vec<_>>>()?;
+        self.queue_events(tx, &drafts).await
+    }
+
     /// The `now` to bind for `COALESCE($n, now())`: `None` defers to the database.
     fn bound_now(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         (self.time == TimeSource::Caller).then_some(now)
@@ -840,7 +872,7 @@ impl Drop for PgMetadataStore {
 
 #[async_trait]
 impl MetadataStore for PgMetadataStore {
-    async fn acquire_lock(
+    async fn acquire_lock_with_events(
         &self,
         repo: &RepoId,
         path: &RepoPath,
@@ -848,6 +880,7 @@ impl MetadataStore for PgMetadataStore {
         now: DateTime<Utc>,
         expires_at: DateTime<Utc>,
         max_locks: u32,
+        events: Option<LockEventBuilder<'_>>,
     ) -> Result<Lock> {
         // The WHERE clause makes the upsert a no-op when a live lock belongs to someone else.
         const UPSERT: &str = "
@@ -871,15 +904,19 @@ impl MetadataStore for PgMetadataStore {
                 .map_err(db)?;
             let lease = self.lease_now(&mut tx, now).await?;
             let expires_at = lease + (expires_at - now);
-            let live: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM locks WHERE repo = $1 AND path = $2 AND expires_at > $3)",
+            // Row-locked so a concurrent takeover cannot change what the events describe.
+            let current = sqlx::query(
+                "SELECT path, owner, acquired_at, expires_at FROM locks WHERE repo = $1 AND path = $2 FOR UPDATE",
             )
             .bind(repo.as_str())
             .bind(path.as_str())
-            .bind(lease)
-            .fetch_one(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await
-            .map_err(db)?;
+            .map_err(db)?
+            .as_ref()
+            .map(lock_from)
+            .transpose()?;
+            let live = current.as_ref().is_some_and(|l| l.expires_at > lease);
             if !live {
                 let held: i64 = sqlx::query_scalar(
                     "SELECT count(*) FROM locks WHERE repo = $1 AND owner = $2 AND expires_at > $3",
@@ -904,8 +941,19 @@ impl MetadataStore for PgMetadataStore {
                 .await
                 .map_err(db)?;
             if let Some(row) = row {
+                let lock = lock_from(&row)?;
+                if let Some(build) = events {
+                    let mut drafts = Vec::new();
+                    if let Some(lapsed) = current.as_ref().filter(|l| l.expires_at <= lease) {
+                        drafts.push(build(LockChange::Expired(lapsed))?);
+                    }
+                    if !live {
+                        drafts.push(build(LockChange::Acquired(&lock))?);
+                    }
+                    self.queue_events(&mut tx, &drafts).await?;
+                }
                 tx.commit().await.map_err(db)?;
-                return lock_from(&row);
+                return Ok(lock);
             }
             drop(tx);
             // Lost to a live lock; read it for the error. If it expired meanwhile, retry.
@@ -920,26 +968,34 @@ impl MetadataStore for PgMetadataStore {
         Err(PynError::Storage("lock acquisition kept racing".into()))
     }
 
-    async fn release_lock(
+    async fn release_lock_with_events(
         &self,
         repo: &RepoId,
         path: &RepoPath,
         owner: &UserId,
         now: DateTime<Utc>,
+        events: Option<LockEventBuilder<'_>>,
     ) -> Result<()> {
-        let done = sqlx::query(
-            "DELETE FROM locks WHERE repo = $1 AND path = $2 AND owner = $3 AND expires_at > COALESCE($4, now())",
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        let row = sqlx::query(
+            "DELETE FROM locks WHERE repo = $1 AND path = $2 AND owner = $3 AND expires_at > COALESCE($4, now())
+             RETURNING path, owner, acquired_at, expires_at",
         )
         .bind(repo.as_str())
         .bind(path.as_str())
         .bind(owner.as_str())
         .bind(self.bound_now(now))
-        .execute(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(db)?;
-        if done.rows_affected() == 0 {
+        let Some(row) = row else {
             return Err(PynError::NotLockHolder(path.clone()));
+        };
+        if let Some(build) = events {
+            let draft = build(LockChange::Released(&lock_from(&row)?))?;
+            self.queue_events(&mut tx, &[draft]).await?;
         }
+        tx.commit().await.map_err(db)?;
         Ok(())
     }
 
@@ -962,12 +1018,14 @@ impl MetadataStore for PgMetadataStore {
         row.as_ref().map(lock_from).transpose()
     }
 
-    async fn force_release_lock(
+    async fn force_release_lock_with_events(
         &self,
         repo: &RepoId,
         path: &RepoPath,
         now: DateTime<Utc>,
+        events: Option<LockEventBuilder<'_>>,
     ) -> Result<Option<Lock>> {
+        let mut tx = self.pool.begin().await.map_err(db)?;
         let row = sqlx::query(
             "DELETE FROM locks WHERE repo = $1 AND path = $2 AND expires_at > COALESCE($3, now())
              RETURNING path, owner, acquired_at, expires_at",
@@ -975,10 +1033,16 @@ impl MetadataStore for PgMetadataStore {
         .bind(repo.as_str())
         .bind(path.as_str())
         .bind(self.bound_now(now))
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(db)?;
-        row.as_ref().map(lock_from).transpose()
+        let lock = row.as_ref().map(lock_from).transpose()?;
+        if let (Some(build), Some(lock)) = (events, &lock) {
+            let draft = build(LockChange::Forced(lock))?;
+            self.queue_events(&mut tx, &[draft]).await?;
+        }
+        tx.commit().await.map_err(db)?;
+        Ok(lock)
     }
 
     async fn list_locks(&self, repo: &RepoId, now: DateTime<Utc>) -> Result<Vec<Lock>> {
@@ -1026,13 +1090,14 @@ impl MetadataStore for PgMetadataStore {
         row.as_ref().map(revision_from).transpose()
     }
 
-    async fn commit_changeset_on(
+    async fn commit_changeset_on_with_events(
         &self,
         repo: &RepoId,
         branch: &str,
         items: Vec<ChangesetItem>,
         now: DateTime<Utc>,
         cap: Option<StorageCap>,
+        events: Option<LockEventBuilder<'_>>,
     ) -> Result<Vec<Revision>> {
         if items.is_empty() {
             return Ok(Vec::new());
@@ -1066,6 +1131,7 @@ impl MetadataStore for PgMetadataStore {
         };
         let draft = draft(&mut tx, repo, head.as_ref(), &items).await?;
         let mut out = Vec::with_capacity(items.len());
+        let mut released = Vec::new();
         for item in items {
             let commit = (seq, draft.record.id);
             out.push(
@@ -1077,16 +1143,18 @@ impl MetadataStore for PgMetadataStore {
                     cap.as_ref(),
                     commit,
                     &at_branch,
+                    &mut released,
                 )
                 .await?,
             );
         }
         store_commit(&mut tx, repo, seq, branch, &draft, &out).await?;
+        self.queue_checkins(&mut tx, events, &released).await?;
         tx.commit().await.map_err(db)?;
         Ok(out)
     }
 
-    async fn push_commits_on(
+    async fn push_commits_on_with_events(
         &self,
         repo: &RepoId,
         branch: &str,
@@ -1094,6 +1162,7 @@ impl MetadataStore for PgMetadataStore {
         pusher: &UserId,
         now: DateTime<Utc>,
         cap: Option<StorageCap>,
+        events: Option<LockEventBuilder<'_>>,
     ) -> Result<Vec<Revision>> {
         if commits.is_empty() {
             return Ok(Vec::new());
@@ -1242,6 +1311,7 @@ impl MetadataStore for PgMetadataStore {
             None => HashMap::new(),
         };
         let mut out = Vec::new();
+        let mut released = Vec::new();
         if known > 0 {
             sqlx::query("UPDATE branches SET head = $3 WHERE repo = $1 AND name = $2")
                 .bind(repo.as_str())
@@ -1274,6 +1344,7 @@ impl MetadataStore for PgMetadataStore {
                         cap.as_ref(),
                         commit,
                         &at_branch,
+                        &mut Vec::new(),
                     )
                     .await?,
                 );
@@ -1281,12 +1352,7 @@ impl MetadataStore for PgMetadataStore {
             for r in &revs {
                 at_branch.insert(r.path.as_str().to_string(), r.id.0 as i64);
                 if last_use.get(r.path.as_str()) == Some(&i) {
-                    sqlx::query("DELETE FROM locks WHERE repo = $1 AND path = $2")
-                        .bind(repo.as_str())
-                        .bind(r.path.as_str())
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(db)?;
+                    released.extend(delete_lock(&mut tx, repo, r.path.as_str()).await?);
                 }
             }
             for r in &c.adopted {
@@ -1305,6 +1371,7 @@ impl MetadataStore for PgMetadataStore {
         {
             return Err(PynError::NotFastForward(branch.to_string()));
         }
+        self.queue_checkins(&mut tx, events, &released).await?;
         tx.commit().await.map_err(db)?;
         Ok(out)
     }
@@ -1387,6 +1454,7 @@ impl MetadataStore for PgMetadataStore {
                     cap.as_ref(),
                     commit,
                     &at_branch,
+                    &mut Vec::new(),
                 )
                 .await?,
             );

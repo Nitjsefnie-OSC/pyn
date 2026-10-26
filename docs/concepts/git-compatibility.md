@@ -86,10 +86,10 @@ The commands named in decision #218.
 | --- | --- | --- | --- |
 | `git init` | `pyn init [<dir>]` | different | Starts a pyn server-home repository, not a git one: creates `<dir>` if missing (the current folder if omitted) with `.pyn/pyn.toml` (every path `shared`, with a commented example of an exclusive rule) and `.pyn/local_only/` holding `repo.toml` with `repo_tool = "pyn"`, and prints `Initialized empty pyn repository in <path>/.pyn`. In a folder that already has a `.git` or `.pyn`, or inside a git work tree or pyn workspace, it fails (`128`) and, for a git repository, names `pyn convert`. With a server set (`--server`, `PYN_SERVER` or the user setting) and `--repo owner/name`, it asks `Create owner/name on <server>? [y/N]` on a terminal (default no); `--create-on-server` creates it without asking, with the same call as `pyn repo create` and the folder's `.pyn/pyn.toml` as the first policy, and records the server and repository in `.pyn/local_only/config.toml`; `--no-create-on-server` never asks. `--create-on-server` without a server and `--repo` is a usage error (`129`). Without a terminal nothing is created on the server (decision #562). |
 | `git init [<dir>]` | `pyn init-git [<dir>]` | same | Starts a new repository: a real `.git` written by pyn (no git program) plus `.pyn/local_only/repo.toml` with `repo_tool = "git"`, and `.pyn/` hidden in `.git/info/exclude`. Creates `<dir>` if missing and prints `Initialized empty Git repository in <path>/.git/`. `-b`/`--initial-branch <name>`, `--object-format sha1\|sha256` and `-q`/`--quiet` work as in git. Divergence: with no `-b` and no `init.defaultBranch` the first branch is `main` (git's default is `master`). `--bare` makes `<dir>` the git directory (`core.bare = true`, no `.pyn/`, prints `Initialized empty Git repository in <dir>/`); `--separate-git-dir <gitdir>` puts the git directory there (its parent must exist, it must be absent or empty) and leaves a `.git` file `gitdir: <absolute path>` in the work tree, and with `--bare` is `fatal` (`128`), as in git. `--template` and `--shared` are a usage error (`129`). In a folder that already has a `.git` or `.pyn`, or inside a git work tree or pyn workspace, it fails (`128`) and names `pyn convert` (decision #562). |
-| | `pyn convert [--home git\|pyn] [-y]` | pyn only | Without `--home`, adopts an existing git repository (hides `.pyn/` in `.git/info/exclude`, creates `.pyn/local_only/`, records `repo_tool = "git"`; safe to run again); outside a git repository, or in a pyn server workspace, it fails with `fatal: ...` (status 128). `--home git` in a pyn server workspace moves it to a git home keeping its history, see [Leaving a pyn server](#leaving-a-pyn-server). `--home pyn` is not built (it needs #95): it fails with `fatal: moving to a pyn server home is not built yet (#572)` (status 128) and changes nothing. |
+| | `pyn convert [--home git\|pyn] [-y] [--exclusive <glob>]...` | pyn only | Without `--home`, adopts an existing git repository (hides `.pyn/` in `.git/info/exclude`, creates `.pyn/local_only/`, records `repo_tool = "git"`; safe to run again); outside a git repository, or in a pyn server workspace, it fails with `fatal: ...` (status 128). `--home git` in a pyn server workspace moves it to a git home keeping its history, see [Leaving a pyn server](#leaving-a-pyn-server). `--home pyn` in a git repository moves it to a repository on a pyn server (`--server` and `--repo owner/name`) keeping its history, see [Moving to a pyn server](#moving-to-a-pyn-server); `--exclusive` (repeatable, `--home pyn` only) makes the paths matching a glob exclusive in the starter policy. |
 | `git clone <repo> [<dir>]` | `pyn clone <source> [<dir>]` | same | A source that is `<server>/owner/name` or `owner/name` on the configured server is cloned from a pyn server, and prints one summary line, not progress. A git URL (`https://`, `ssh://`, `user@host:path`) is cloned into a git repository with git's behaviour, flags and output; see [Clone from a git URL](#clone-from-a-git-url), which also says how an `http(s)` address is told apart. |
-| `git clone -b`, `--bare`, `--mirror`, `--separate-git-dir`, `-o`, `-n`, `--single-branch`, `--no-tags`, `-c`, `-q`, `--progress`, `--depth`, `--shallow-since`, `--shallow-exclude` | `pyn clone ...` | git URL: supported | Git's behaviour. On a pyn server clone they are a usage error (`129`): that clone takes everything the server has, on its default branch. |
-| `git clone --shallow-submodules`, `--filter`, `--recurse-submodules`, `--reference`, `--template`, `--local`, `--no-hardlinks` | none | unsupported | Usage error (`129`) naming the flag: partial and submodule clones are not built, and `--local`, `--no-local`, `--no-hardlinks` and `--shared` are not taken: a local-path source is cloned through the transfer protocol, see [Local paths](#local-paths-and-file-urls). |
+| `git clone -b`, `--bare`, `--mirror`, `--separate-git-dir`, `-o`, `-n`, `--single-branch`, `--no-tags`, `-c`, `-q`, `--progress`, `--depth`, `--shallow-since`, `--shallow-exclude`, `--filter`, `--sparse` | `pyn clone ...` | git URL: supported | Git's behaviour. On a pyn server clone they are a usage error (`129`): that clone takes everything the server has, on its default branch. |
+| `git clone --shallow-submodules`, `--also-filter-submodules`, `--recurse-submodules`, `--reference`, `--template`, `--local`, `--no-hardlinks` | none | unsupported | Usage error (`129`) naming the flag: submodule clones are not built, and `--local`, `--no-local`, `--no-hardlinks` and `--shared` are not taken: a local-path source is cloned through the transfer protocol, see [Local paths](#local-paths-and-file-urls). |
 | `pyn clone --revision <commit>` | | pyn only | Clone as of a commit (a hash, `HEAD~N`). Git does this with `clone` then `checkout`. |
 | `pyn clone --no-local-store` | | pyn only | A pyn server clone keeps a partial local store of the history under `.pyn/local_only/store/` and commits locally by default (`--local-store` says the same); this opts out and commits straight to the server. See [the local store](workspace.md#the-local-store). A usage error for a git URL. |
 | `pyn migrate` | | pyn only | Converts a workspace made before local commits; see [migrating](workspace.md#migrating-a-workspace). |
@@ -300,7 +300,7 @@ applied.
 | `--write-commit-graph`, `--no-write-commit-graph`, `--no-recurse-submodules` | Accepted and ignored. |
 | `--depth`, `--deepen`, `--shallow-since`, `--shallow-exclude`, `--unshallow` | Git's shallow fetch, see [Shallow repositories](#shallow-repositories). |
 | `--update-shallow` | Usage error (`129`): not built. |
-| `--filter`, `--refetch` | Usage error (`129`): partial fetch is not built. |
+| `--filter=<spec>`, `--no-filter`, `--refetch` | Git's partial fetch, see [Partial clones](#partial-clones). |
 | `--atomic`, `--set-upstream`, `--recurse-submodules` | Usage error (`129`): not built. Any other unknown flag is a usage error as everywhere. |
 
 What a fetch does, in git's order:
@@ -355,8 +355,7 @@ server sha256` (`128`). A repository with no objects, refs or index takes the re
 Differences from git, all deliberate or not yet done: `--dry-run` downloads objects like git does, but git lists auto-followed tags twice on a dry run and pyn once;
 ids are not lengthened to stay unique and do not scale with the repository's size; there is no per-object "Receiving objects" progress,
 only what the server sends;
-`fetch.output`, `fetch.showForcedUpdates`, `fetch.recurseSubmodules`, `fetch.writeCommitGraph`, `remote.<name>.promisor`,
-`--refmap`, `--negotiation-tip`, `--server-option`, `--stdin` and `-4`/`-6` are not read or taken; `--all` runs
+`fetch.output`, `fetch.showForcedUpdates`, `fetch.recurseSubmodules`, `fetch.writeCommitGraph`, `--refmap`, `--negotiation-tip`, `--server-option`, `--stdin` and `-4`/`-6` are not read or taken; `--all` runs
 the remotes one at a time whatever `-j` or `fetch.parallel` say, so `FETCH_HEAD` lists them in configuration order; the stale-ref hint after a ref could
 not be written names `pyn remote prune`.
 
@@ -383,7 +382,45 @@ boundary commit per line, removed when the history is complete). A shallow flag 
   `shallow` and `deepen*` lines. The in-process upload-pack for local remotes answers all of them, with `--shallow-since` and
   `--shallow-exclude` not combinable there (git allows both together).
 
-Not done: `--update-shallow`, `--shallow-submodules` and partial clones (`--filter`).
+Not done: `--update-shallow` and `--shallow-submodules`.
+
+### Partial clones
+
+`pyn clone --filter=<spec>` and `pyn fetch --filter=<spec>` take git's object filters and its promisor configuration, so a
+repository either tool made is a partial clone for both. Supported specs: `blob:none`, `blob:limit=<n>[k|m|g]` (blobs of at
+least `n` bytes are left out), `tree:<depth>` (trees and blobs at that depth from the root tree or deeper; `tree:0` leaves out
+every tree and blob until asked for) and `combine:<a>+<b>` (also what several `--filter` options make). `sparse:<...>` and
+`object:type=<...>` are refused with `... is not built`; any other spec is `fatal: invalid filter-spec '<spec>'` (`128`).
+
+- A partial clone records `remote.<name>.promisor = true` and `remote.<name>.partialclonefilter = <spec>` and sets
+  `core.repositoryformatversion = 1`. The spec is the default for later fetches from that remote (`--no-filter` fetches
+  everything, `--filter` overrides it for one fetch and, like git, does not replace the stored default); `fetch --filter` on a
+  complete clone turns it into a partial one. `--refetch` asks again for every object as a fresh clone would, applying the
+  filter in effect, without negotiating. Packs received from a promisor remote get a `.promisor` file beside them.
+- Objects the clone lacks are fetched from the promisor remote when a command reads them: `checkout`, `switch`,
+  `merge`, `diff`, `show`, `log -p`, `blame`, `grep`, `cat-file` and `ls-tree -l` need no flag. Checkout and `switch` ask for all the
+  blobs of the files they write in one request; other commands ask object by object (a missing tree brings its subtrees). The
+  request is a protocol v2 `fetch` with `want <id>` and `filter blob:none`, so the server must allow filters
+  (`uploadpack.allowFilter`), and an unreachable remote fails the command that needed the object. `fetch` and `merge` do
+  not download trees or blobs only to check for LFS pointers, so no LFS warning is printed in a partial clone.
+- `fsck`, `prune`, `repack` and `gc` treat an object a promisor pack names, or that an object in one names, as present rather
+  than missing, and never download. `repack -a` keeps the objects of promisor packs in a pack with a `.promisor` file. A fetch's
+  connectivity check follows commits and as many trees as the filter keeps.
+- A server that does not advertise `filter` gets no filter: `warning: filtering not recognized by server, ignoring`, a full
+  fetch, and the promisor settings are still recorded, as git does. A local-path source ignores `--filter` like `--depth`
+  (`warning: --filter is ignored in local clones; use file:// instead.`) and also records the settings; `file://`, ssh and HTTP
+  honour it. Combined with `--depth` and the other clone flags it behaves as in git.
+- Wire: protocol v2 `fetch` `filter <spec>` (and the v0/v1 `filter` capability and line). The in-process upload-pack for local
+  remotes advertises `filter` when `uploadpack.allowFilter` is true and answers `blob:none`, `blob:limit`, `tree:<depth>` and
+  `combine:`; objects named in a `want` are always sent. Partial fetches ask for packs without thin deltas.
+
+`crates/pyn-cli/tests/git_partial.rs` compares clones, fetches and the commands above with real git on twin clones (config, refs, the
+objects held and the objects `git rev-list --objects --missing=print` reports missing, `.promisor` files, `git fsck`), over ssh,
+`file://`, local paths and HTTP, and runs pyn against partial clones git made.
+
+Not done: `sparse:<oid>` and `object:type=` filters, `rev-list --missing=...` (pyn has no `rev-list`), a filter of its own for a
+second promisor remote (those are tried in name order), writing `extensions.partialClone` (it is read), `clone
+--also-filter-submodules`, and bundles with a `@filter=` capability.
 
 ### Pull on a git home
 
@@ -507,7 +544,7 @@ branches exist, keeps that unborn `HEAD`, fetches the rest and warns `remote HEA
 removed: the new directory, or only `.git` (or the contents of a bare target) when the directory already existed and was empty. A
 failure while checking out leaves the repository in place, as git does.
 
-Differences from git, all deliberate or not yet done: no hooks, templates or `description` file are created; there is no "Updating files" progress; `--shallow-submodules`, `--filter`, `--also-filter-submodules`, `--recurse-submodules`,
+Differences from git, all deliberate or not yet done: no hooks, templates or `description` file are created; there is no "Updating files" progress; `--shallow-submodules`, `--also-filter-submodules`, `--recurse-submodules`,
 `--reference`, `--reference-if-able`, `--dissociate`, `--template`, `--local`, `--no-local`,
 `--no-hardlinks`, `--shared`, `--upload-pack`, `--server-option`, `--bundle-uri` and `--ref-format` are usage errors. `--sparse`
 is supported; see [Sparse checkout](#sparse-checkout).
@@ -791,7 +828,7 @@ schedules them.
 Decision #245: a repository has one home, a pyn server or git. In a git repository (a `.git` is found) pyn behaves as git,
 through its own implementation of git's object store, refs and index, with no git library or binary (decision #30). A
 `.pyn/pyn.toml` there is ignored: no path is exclusive, and the commands that need a pyn server refuse and name it. Going
-from a git home to a pyn server is one explicit step, `pyn convert --home pyn` (issues #572 and #95), which does not exist yet. The other direction exists: see [Leaving a pyn server](#leaving-a-pyn-server).
+from a git home to a pyn server is one explicit step, `pyn convert --home pyn`: see [Moving to a pyn server](#moving-to-a-pyn-server). The other direction is [Leaving a pyn server](#leaving-a-pyn-server).
 
 **Nothing git sees changes except what you asked for.** Hooks, notes, configuration and line endings are never touched, and
 the work tree changes only where a command you ran says it does (`switch`, `checkout`, `restore`, `merge`, `stash`), never
@@ -830,7 +867,7 @@ and asks `Continue? [y/N]`; `-y` or `--yes` skips the question, and without a te
 
 - **Kept:** every branch, and every commit with its author, committer, times, parents, message and signature, the trees and the
   content of every file. The server's SHA-256 ids are kept, so the result is a SHA-256 repository (`extensions.objectformat`) and
-  signatures stay valid; a SHA-1 repository needs the rehash tracked in #572. Local commits the server lacks, and the local tags,
+  signatures stay valid; a SHA-1 git home is rehashed on the way to a server, see [Moving to a pyn server](#moving-to-a-pyn-server). Local commits the server lacks, and the local tags,
   come along from the local store; a branch that has diverged from the server's is refused (`pull` or `rebase` first).
 - **Lost:** locks (a lock held on the server stays there and no longer applies), revision numbers, the shared and exclusive
   modes (`.pyn/pyn.toml` stays as local state that a git home ignores), changes staged with `pyn add`, and the record of which
@@ -840,6 +877,45 @@ and asks `Continue? [y/N]`; `-y` or `--yes` skips the question, and without a te
   The index is written from `HEAD`, so unmodified files are clean and edited ones show as modified. The command then records
   `repo_tool = "git"`, hides `.pyn/` in `.git/info/exclude`, and removes `.pyn/local_only/state/` and `store/` (the marker alone
   decides the home; the settings in `config.toml` stay). It refuses when a `.git` exists or a merge is in progress.
+
+### Moving to a pyn server
+
+`pyn convert --home pyn --server <url> --repo <owner/name>` (decision #562, issue #572) moves a git home repository to a
+repository on a pyn server and keeps the history. It shows what it will do and asks `Continue? [y/N]`; `-y` or `--yes` skips
+the question, and without a terminal and without `--yes` it fails (`128`) with nothing changed. `--server` can come from
+`PYN_SERVER` or the user config; `--repo` is required (`129` without it).
+
+- **The repository on the server:** created first (with the server's default settings and no policy) when it does not exist and
+  the server lets the caller create it; an existing repository must be empty, and one with history is refused, because the
+  command never merges histories.
+- **Kept:** every local branch with its commits (author, committer, times, parents, message), trees and file contents, and the
+  files on disk as they are. A SHA-256 git repository keeps every id. The server stores SHA-256, so a SHA-1 repository is
+  rehashed: every commit, tree and file gets a new id, the parent links and trees follow, and all other bytes of a commit are
+  kept, but a signature on a commit no longer verifies (it signed the old bytes). Commit ids therefore change for SHA-1 sources
+  and the confirmation says so.
+- **Branch names:** the server's default branch is `main`. The git branch called `main` becomes it; a repository with no
+  `main` has its checked-out branch pushed as `main` (the message says so), and the other branches keep their names. A
+  detached `HEAD` is refused.
+- **Policy:** after the history, the starter policy `.pyn/pyn.toml` (`default = "shared"`, plus the `--exclusive <glob>`
+  paths) is committed to `main` and written into the folder, which makes the matching existing files exclusive and read-only
+  until locked. A repository whose history already tracks `.pyn/pyn.toml` keeps it, and `--exclusive` is then a usage error. An
+  untracked `.pyn/pyn.toml` in the folder is sent instead of the starter policy. The history is sent before the policy, so
+  nothing in it needs a lock; a server whose default rules make a path of the history exclusive refuses the move for that reason.
+- **How:** everything the server would refuse is checked first, and a refusal lists the commits and changes nothing, on the server
+  or in the folder: a submodule entry, a merge of more than two parents, an empty commit, a commit that changes more than
+  10000 files, a tree over 100000 entries, a commit the server cannot store byte-for-byte (not in git's canonical form, or not
+  UTF-8), more than one root commit, a shallow clone, and an operation in progress (merge, rebase, cherry-pick, revert, bisect).
+  Then every file is uploaded, and each branch is pushed in batches inside the push limits. A commit merged into a branch whose
+  branch is gone is pushed through a temporary branch, deleted at the end.
+- **The folder:** only after every branch is on the server does the command write `.pyn/local_only/config.toml` (server and
+  repository), the revision each file is at, the branch the workspace is on, and `repo_tool = "pyn"`, last, which is what turns
+  the folder into a pyn home. If the folder cannot be set up it stays a git home. If the server refuses midway, the repository
+  stays on the server partly filled; delete it or convert into another name.
+- **`.git` is kept**, untouched, and ignored by pyn (a line in `.pyn/local_only/ignore`). Remove or move it when it is no longer
+  needed; `pyn convert --home git` refuses while one exists.
+- **Not carried over:** tags (the server has none; they stay in `.git`), stashes, the index (staged changes), hooks, remotes and
+  other git configuration. Files tracked through Git LFS arrive as their pointer files, with a warning. Files whose content on disk
+  differs from the committed content (line-ending or filter conversions) show as modified in `pyn status`.
 
 ### Ignored files
 
@@ -2336,7 +2412,7 @@ Only the commands that act on the repository in the working directory refuse, wi
 home that has them:
 
 ```text
-fatal: `pyn lock` needs a pyn server, and this repository is a git repository; `pyn convert --home pyn` will move it to one (not built yet, #572)
+fatal: `pyn lock` needs a pyn server, and this repository is a git repository; `pyn convert --home pyn` will move it to one
 ```
 
 These are `lock`, `unlock`, `locks`, `policy`, `audit`, `verify` and `summary`.
@@ -2357,7 +2433,7 @@ Commands a git home will gain fail with exit `1`, as the other git-only commands
 | `update` | `update` #310. |
 | `get` | Per-path revisions, which git has no equivalent of; not scheduled. |
 
-`pyn convert` adopts the repository as a git home today; moving it to a pyn server is `pyn convert --home pyn` (#572, #95), which does not exist yet.
+`pyn convert` adopts the repository as a git home; moving it to a pyn server is `pyn convert --home pyn`, see [Moving to a pyn server](#moving-to-a-pyn-server).
 
 ### Packs (library, provisional)
 

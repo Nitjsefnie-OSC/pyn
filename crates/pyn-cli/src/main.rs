@@ -195,6 +195,8 @@ enum Command {
     Push(git_home::PushArgs),
     /// List the references in a remote git repository (ssh or smart HTTP; works anywhere).
     LsRemote(ls_remote::LsRemoteArgs),
+    /// Create, verify and unpack git bundle files (works anywhere; creating needs a git repository).
+    Bundle(git_home::BundleArgs),
     /// Show what differs between this workspace and the server.
     Status(short_status::StatusArgs),
     /// Start a pyn repository in a folder that is not tracked yet (`pyn convert` adopts a git repository).
@@ -246,6 +248,18 @@ enum Command {
     CatFile(git_home::CatFileArgs),
     /// List the refs and the ids they point at (a git repository only).
     ShowRef(git_home::ShowRefArgs),
+    /// Count loose objects and packs and the space they take (a git repository only).
+    CountObjects(git_home::CountObjectsArgs),
+    /// Check the connectivity and validity of the objects (a git repository only).
+    Fsck(git_home::FsckArgs),
+    /// Remove unreachable loose objects (a git repository only).
+    Prune(git_home::PruneArgs),
+    /// Clean up and optimize the repository's storage (a git repository only).
+    Gc(git_home::GcArgs),
+    /// Pack loose refs into one file (a git repository only).
+    PackRefs(git_home::PackRefsArgs),
+    /// Pack objects into packs and drop what they replace (a git repository only).
+    Repack(git_home::RepackArgs),
     /// Summarize the history by author (a git repository only).
     Shortlog(git_home::ShortlogArgs),
     /// Name a commit after the nearest tag it descends from (a git repository only).
@@ -1284,6 +1298,7 @@ fn runs_anywhere(command: &Command) -> bool {
             | Command::Role(_)
             | Command::Invite(_)
             | Command::LsRemote(_)
+            | Command::Bundle(_)
     )
 }
 
@@ -1365,6 +1380,9 @@ fn run(cli: Cli) -> Result<()> {
     };
     if let Command::LsRemote(args) = &cli.command {
         return ls_remote::run(args, git.as_ref());
+    }
+    if let Command::Bundle(args) = cli.command {
+        return git_home::bundle(args, git.as_ref());
     }
     if let Command::Diff {
         args,
@@ -1588,6 +1606,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::InitGit(_) => unreachable!("handled before the server is consulted"),
         Command::Convert(args) => git_home::to_git(&backend, in_workspace("convert")?, &args)?,
         Command::LsRemote(_) => unreachable!("handled before the server is consulted"),
+        Command::Bundle(_) => unreachable!("handled before the server is consulted"),
         Command::Login {
             username,
             password_stdin,
@@ -2001,6 +2020,12 @@ fn run(cli: Cli) -> Result<()> {
         | Command::LsTree(_)
         | Command::CatFile(_)
         | Command::ShowRef(_)
+        | Command::CountObjects(_)
+        | Command::Fsck(_)
+        | Command::Prune(_)
+        | Command::Gc(_)
+        | Command::PackRefs(_)
+        | Command::Repack(_)
         | Command::Shortlog(_)
         | Command::Describe(_)
         | Command::NameRev(_)

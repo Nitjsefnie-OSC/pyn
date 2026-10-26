@@ -472,6 +472,7 @@ pub(super) fn fetch_core(
     let mut transport = conn.transport;
     let (adopted, mut up) = open_session(git, &mut *transport)?;
     let git = adopted.as_ref().unwrap_or(git);
+    super::bundle::check_remote(git, &target.url, o.clone)?;
     let remote_refs: Vec<RemoteRef> = up.ls_refs(&LsRefsOptions {
         prefixes: Vec::new(),
         symrefs: true,
@@ -837,8 +838,12 @@ pub fn fetch(git: &GitHome, args: FetchArgs) -> Result<()> {
         .chain(typed)
         .collect::<Vec<_>>()
         .join(" ");
+    let auto_gc = !args.no_auto_gc && !args.dry_run;
     if run(git, &args, &action)? {
         std::process::exit(1);
+    }
+    if auto_gc {
+        super::gc::auto(git);
     }
     Ok(())
 }

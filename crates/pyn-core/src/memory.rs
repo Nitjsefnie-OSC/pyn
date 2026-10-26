@@ -1,7 +1,7 @@
 //! In-memory stores for tests and the dev server; one `Mutex` makes each primitive atomic.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -20,6 +20,7 @@ use crate::branch::{Branch, DEFAULT_BRANCH, conflicts};
 use crate::commit_record::{CommitDraft, TreeChange, TreeEdit, draft_commit};
 use crate::error::{PynError, Result};
 use crate::history::{HistoryCursor, HistoryScan};
+use crate::limit_events::LimitsEvent;
 use crate::limits::{Limits, LimitsChange, RepoUsage, StorageCap, Usage};
 use crate::merge::{MergeWrite, MergeWritten};
 use crate::object::{KeyHasher, Keying, ObjectRead, ObjectReader, ObjectStore};
@@ -37,9 +38,9 @@ use crate::types::{
     RevisionId, UserId,
 };
 use crate::webhook::{
-    Delivery, DeliveryQuery, DeliveryStatus, DueDelivery, Jitter, MAX_ACTIVE_SECRETS, NewSecret,
-    NewSubscription, OutboxEvent, Subscription, SubscriptionUpdate, WebhookSecret, WebhookStore,
-    retry_delay,
+    Delivery, DeliveryQuery, DeliveryStatus, DueDelivery, EventDraft, Jitter, MAX_ACTIVE_SECRETS,
+    NewSecret, NewSubscription, OutboxEvent, Subscription, SubscriptionUpdate, WebhookSecret,
+    WebhookStore, retry_delay,
 };
 
 type Key = (RepoId, RepoPath);
@@ -322,6 +323,16 @@ impl State {
         cap: Option<&StorageCap>,
     ) -> Result<Vec<Revision>> {
         self.ensure_default_branch(repo, pusher, now);
+        let created = self.branch(repo, branch).is_err();
+        if created {
+            self.branches.entry(repo.clone()).or_default().push(Branch {
+                name: branch.to_string(),
+                head: None,
+                default: false,
+                created_at: now,
+                created_by: pusher.clone(),
+            });
+        }
         let head = self.branch(repo, branch)?.head;
         let mut tip = head;
         for (i, c) in commits.iter().enumerate() {
@@ -330,11 +341,23 @@ impl State {
                 (0, Some(h)) => {
                     first.is_some_and(|p| p == h || self.ancestors(repo, &h).contains(&p))
                 }
+                (0, None) if created => match first {
+                    Some(p) => self.commit_record(repo, &p).is_some(),
+                    None => self.commits.get(repo).is_none_or(Vec::is_empty),
+                },
                 (0, None) => first.is_none(),
                 _ => first == tip,
             };
             if !linked {
-                return Err(PynError::NotFastForward(branch.to_string()));
+                return Err(if created {
+                    PynError::PushInvalid(
+                        "the first commit of a new branch must be a child of a commit the repository has, \
+                         or the repository must be empty"
+                            .into(),
+                    )
+                } else {
+                    PynError::NotFastForward(branch.to_string())
+                });
             }
             for other in c.record.parents.iter().skip(1) {
                 if self.commit_record(repo, other).is_none() {
@@ -505,14 +528,34 @@ impl State {
     }
 }
 
+/// Where a memory store queues the events of a change: the webhook store it shares state with, if any.
+#[derive(Default, Clone)]
+struct Outbox(Option<Arc<MemoryWebhookStore>>);
+
+impl Outbox {
+    fn queue(&self, events: &[EventDraft]) -> Result<()> {
+        match &self.0 {
+            Some(hooks) => hooks.queue(events),
+            None => Ok(()),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct MemoryMetadataStore {
     state: Mutex<State>,
+    outbox: Outbox,
 }
 
 impl MemoryMetadataStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Queues the events of repository changes in `hooks`, under the lock that makes the change.
+    pub fn with_outbox(mut self, hooks: Arc<MemoryWebhookStore>) -> Self {
+        self.outbox = Outbox(Some(hooks));
+        self
     }
 
     /// Rewrites a stored revision in place, the way an attacker with database access would.
@@ -1368,10 +1411,11 @@ impl MetadataStore for MemoryMetadataStore {
         })
     }
 
-    async fn create_repo_capped(
+    async fn create_repo_capped_with_events(
         &self,
         repo: RepoRecord,
         max_repos: Option<u64>,
+        events: &[EventDraft],
     ) -> Result<RepoRecord> {
         let mut st = self.state.lock().unwrap();
         if st
@@ -1389,6 +1433,7 @@ impl MetadataStore for MemoryMetadataStore {
                 limit,
             });
         }
+        self.outbox.queue(events)?;
         st.ensure_default_branch(&repo.id, &repo.owner, repo.created_at);
         st.repos.insert(repo.id.clone(), repo.clone());
         Ok(repo)
@@ -1439,7 +1484,12 @@ impl MetadataStore for MemoryMetadataStore {
         Ok(out)
     }
 
-    async fn update_repo(&self, id: &RepoId, update: RepoUpdate) -> Result<RepoRecord> {
+    async fn update_repo_with_events(
+        &self,
+        id: &RepoId,
+        update: RepoUpdate,
+        events: &[EventDraft],
+    ) -> Result<RepoRecord> {
         let mut st = self.state.lock().unwrap();
         let mut repo = st
             .repos
@@ -1462,12 +1512,17 @@ impl MetadataStore for MemoryMetadataStore {
         {
             return Err(PynError::RepoExists(repo.address()));
         }
+        self.outbox.queue(events)?;
         st.repos.insert(id.clone(), repo.clone());
         Ok(repo)
     }
 
-    async fn delete_repo(&self, id: &RepoId) -> Result<bool> {
+    async fn delete_repo_with_events(&self, id: &RepoId, events: &[EventDraft]) -> Result<bool> {
         let mut st = self.state.lock().unwrap();
+        if !st.repos.contains_key(id) {
+            return Ok(false);
+        }
+        self.outbox.queue(events)?;
         st.locks.retain(|(r, _), _| r != id);
         st.revisions.retain(|(r, _), _| r != id);
         st.sizes.retain(|(r, _), _| r != id);
@@ -1644,11 +1699,18 @@ fn plain_account(user: &UserId, now: DateTime<Utc>) -> AccountRecord {
 #[derive(Default)]
 pub struct MemoryAccessStore {
     state: Mutex<AccessState>,
+    outbox: Outbox,
 }
 
 impl MemoryAccessStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Queues the events of account and organization changes in `hooks`, under the lock that makes the change.
+    pub fn with_outbox(mut self, hooks: Arc<MemoryWebhookStore>) -> Self {
+        self.outbox = Outbox(Some(hooks));
+        self
     }
 }
 
@@ -1739,11 +1801,17 @@ impl AccessStore for MemoryAccessStore {
         Ok(())
     }
 
-    async fn create_user(&self, user: &UserId, now: DateTime<Utc>) -> Result<bool> {
+    async fn create_user_with_events(
+        &self,
+        user: &UserId,
+        now: DateTime<Utc>,
+        events: &[EventDraft],
+    ) -> Result<bool> {
         let mut st = self.state.lock().unwrap();
         if st.accounts.contains_key(user) {
             return Ok(false);
         }
+        self.outbox.queue(events)?;
         st.accounts.insert(user.clone(), plain_account(user, now));
         Ok(true)
     }
@@ -1752,11 +1820,18 @@ impl AccessStore for MemoryAccessStore {
         Ok(self.state.lock().unwrap().accounts.contains_key(user))
     }
 
-    async fn create_org(&self, org: &UserId, owner: &UserId, now: DateTime<Utc>) -> Result<bool> {
+    async fn create_org_with_events(
+        &self,
+        org: &UserId,
+        owner: &UserId,
+        now: DateTime<Utc>,
+        events: &[EventDraft],
+    ) -> Result<bool> {
         let mut st = self.state.lock().unwrap();
         if st.accounts.contains_key(org) {
             return Ok(false);
         }
+        self.outbox.queue(events)?;
         st.accounts
             .entry(owner.clone())
             .or_insert_with(|| plain_account(owner, now));
@@ -1787,7 +1862,7 @@ impl AccessStore for MemoryAccessStore {
         Ok(out)
     }
 
-    async fn delete_org(&self, org: &UserId) -> Result<bool> {
+    async fn delete_org_with_events(&self, org: &UserId, events: &[EventDraft]) -> Result<bool> {
         let mut st = self.state.lock().unwrap();
         if st
             .accounts
@@ -1796,6 +1871,7 @@ impl AccessStore for MemoryAccessStore {
         {
             return Ok(false);
         }
+        self.outbox.queue(events)?;
         st.accounts.remove(org);
         st.limits.remove(org);
         st.org_roles.retain(|(o, _), _| o != org);
@@ -1880,6 +1956,19 @@ impl AccessStore for MemoryAccessStore {
     async fn update_owner_limits(&self, owner: &UserId, change: LimitsChange) -> Result<Limits> {
         let mut st = self.state.lock().unwrap();
         let updated = change.apply(st.limits.get(owner).copied().unwrap_or_default());
+        st.limits.insert(owner.clone(), updated);
+        Ok(updated)
+    }
+
+    async fn update_owner_limits_with_events(
+        &self,
+        owner: &UserId,
+        change: LimitsChange,
+        event: LimitsEvent<'_>,
+    ) -> Result<Limits> {
+        let mut st = self.state.lock().unwrap();
+        let updated = change.apply(st.limits.get(owner).copied().unwrap_or_default());
+        self.outbox.queue(&[event(&updated)?])?;
         st.limits.insert(owner.clone(), updated);
         Ok(updated)
     }
@@ -2169,11 +2258,16 @@ impl AccessStore for MemoryAccessStore {
             .remove(&(org.clone(), subject.clone(), effect)))
     }
 
-    async fn create_account(&self, new: NewAccount) -> Result<bool> {
+    async fn create_account_with_events(
+        &self,
+        new: NewAccount,
+        events: &[EventDraft],
+    ) -> Result<bool> {
         let mut st = self.state.lock().unwrap();
         if st.accounts.contains_key(&new.user) {
             return Ok(false);
         }
+        self.outbox.queue(events)?;
         st.passwords.insert(new.user.clone(), new.password_hash);
         let account = AccountRecord {
             email: new.email,
@@ -2209,11 +2303,12 @@ impl AccessStore for MemoryAccessStore {
             .collect())
     }
 
-    async fn complete_verification(
+    async fn complete_verification_with_events(
         &self,
         user: &UserId,
         signup: SignupStage,
         now: DateTime<Utc>,
+        events: &[EventDraft],
     ) -> Result<bool> {
         let mut st = self.state.lock().unwrap();
         let Some(email) = st.accounts.get(user).and_then(|a| a.email.clone()) else {
@@ -2227,30 +2322,39 @@ impl AccessStore for MemoryAccessStore {
         if taken {
             return Ok(false);
         }
+        self.outbox.queue(events)?;
         let account = st.accounts.get_mut(user).expect("checked above");
         account.email_verified_at = Some(now);
         account.signup = signup;
         Ok(true)
     }
 
-    async fn set_signup(&self, user: &UserId, signup: SignupStage) -> Result<bool> {
-        let mut st = self.state.lock().unwrap();
-        let Some(account) = st.accounts.get_mut(user) else {
-            return Ok(false);
-        };
-        account.signup = signup;
-        Ok(true)
-    }
-
-    async fn set_disabled(
+    async fn set_signup_with_events(
         &self,
         user: &UserId,
-        disabled: Option<(DateTime<Utc>, Option<String>)>,
+        signup: SignupStage,
+        events: &[EventDraft],
     ) -> Result<bool> {
         let mut st = self.state.lock().unwrap();
         let Some(account) = st.accounts.get_mut(user) else {
             return Ok(false);
         };
+        self.outbox.queue(events)?;
+        account.signup = signup;
+        Ok(true)
+    }
+
+    async fn set_disabled_with_events(
+        &self,
+        user: &UserId,
+        disabled: Option<(DateTime<Utc>, Option<String>)>,
+        events: &[EventDraft],
+    ) -> Result<bool> {
+        let mut st = self.state.lock().unwrap();
+        let Some(account) = st.accounts.get_mut(user) else {
+            return Ok(false);
+        };
+        self.outbox.queue(events)?;
         (account.disabled_at, account.disabled_reason) = match disabled {
             Some((at, reason)) => (Some(at), reason),
             None => (None, None),
@@ -2258,11 +2362,12 @@ impl AccessStore for MemoryAccessStore {
         Ok(true)
     }
 
-    async fn disable_account(
+    async fn disable_account_with_events(
         &self,
         user: &UserId,
         at: DateTime<Utc>,
         reason: Option<String>,
+        events: &[EventDraft],
     ) -> Result<AccountDisable> {
         let mut st = self.state.lock().unwrap();
         let Some(target) = st.accounts.get(user) else {
@@ -2279,6 +2384,7 @@ impl AccessStore for MemoryAccessStore {
                 return Ok(AccountDisable::LastAdmin);
             }
         }
+        self.outbox.queue(events)?;
         let account = st.accounts.get_mut(user).unwrap();
         (account.disabled_at, account.disabled_reason) = (Some(at), reason);
         Ok(AccountDisable::Disabled)
@@ -2380,7 +2486,11 @@ impl AccessStore for MemoryAccessStore {
         Ok(())
     }
 
-    async fn create_external_account(&self, new: NewExternalAccount) -> Result<ExternalCreate> {
+    async fn create_external_account_with_events(
+        &self,
+        new: NewExternalAccount,
+        events: &[EventDraft],
+    ) -> Result<ExternalCreate> {
         let mut st = self.state.lock().unwrap();
         if st.accounts.contains_key(&new.user) {
             return Ok(ExternalCreate::NameTaken);
@@ -2400,6 +2510,7 @@ impl AccessStore for MemoryAccessStore {
         {
             return Ok(ExternalCreate::EmailTaken);
         }
+        self.outbox.queue(events)?;
         let verified_at = new.email.is_some().then_some(new.identity.created_at);
         let account = AccountRecord {
             email: new.email,
@@ -2508,7 +2619,12 @@ impl AccessStore for MemoryAccessStore {
         Ok(self.state.lock().unwrap().settings.clone())
     }
 
-    async fn complete_setup(&self, admin: NewAccount, settings: ServerSettings) -> Result<bool> {
+    async fn complete_setup_with_events(
+        &self,
+        admin: NewAccount,
+        settings: ServerSettings,
+        events: &[EventDraft],
+    ) -> Result<bool> {
         let mut st = self.state.lock().unwrap();
         if st.settings.is_some() {
             return Ok(false);
@@ -2516,6 +2632,7 @@ impl AccessStore for MemoryAccessStore {
         if st.accounts.contains_key(&admin.user) {
             return Err(PynError::UserExists(admin.user));
         }
+        self.outbox.queue(events)?;
         st.passwords.insert(admin.user.clone(), admin.password_hash);
         let account = AccountRecord {
             email: admin.email,
@@ -2993,6 +3110,14 @@ pub struct MemoryWebhookStore {
 impl MemoryWebhookStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn queue(&self, events: &[EventDraft]) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        for e in events {
+            st.append_event(&e.event_type, &e.payload, e.at)?;
+        }
+        Ok(())
     }
 }
 

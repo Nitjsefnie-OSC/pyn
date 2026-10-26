@@ -68,6 +68,8 @@ mod uploads;
 pub use uploads::*;
 mod webhooks;
 pub use webhooks::*;
+mod outbox;
+pub use outbox::*;
 
 struct Harness {
     store: Store,
@@ -3269,7 +3271,11 @@ macro_rules! contract_tests {
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_changeset_mixes_writes_and_deletions_atomically);
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_deletion_on_a_branch_leaves_the_other_branches_alone);
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_changeset_refuses_a_path_written_and_deleted_or_a_policy_deletion);
-        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_push_needs_the_checkin_permission_and_an_existing_branch);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_push_needs_the_checkin_permission);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_push_to_an_unknown_branch_creates_it_atomically);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_new_branch_must_start_from_a_commit_the_repository_has);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_refused_push_to_an_unknown_branch_leaves_no_branch);
+        $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_new_branch_name_cannot_clash_with_an_existing_branch);
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_push_past_the_storage_cap_applies_nothing);
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; racing_pushes_to_one_branch_have_exactly_one_winner);
         $crate::contract_tests!(@one $factory; [$(#[$attr])*]; a_blob_is_read_by_id_only_when_a_revision_of_the_repository_names_it);
@@ -4151,16 +4157,19 @@ impl MetadataStore for HookedMeta {
             .await
     }
 
-    async fn create_repo_capped(
+    async fn create_repo_capped_with_events(
         &self,
         repo: RepoRecord,
         max_repos: Option<u64>,
+        events: &[crate::EventDraft],
     ) -> crate::Result<RepoRecord> {
         let hook = self.before_create.lock().unwrap().take();
         if let Some(hook) = hook {
             hook().await;
         }
-        self.inner.create_repo_capped(repo, max_repos).await
+        self.inner
+            .create_repo_capped_with_events(repo, max_repos, events)
+            .await
     }
 
     async fn find_repo(&self, owner: &UserId, name: &str) -> crate::Result<Option<RepoRecord>> {
@@ -4183,12 +4192,21 @@ impl MetadataStore for HookedMeta {
         self.inner.list_public_repos(after, limit).await
     }
 
-    async fn update_repo(&self, id: &RepoId, update: RepoUpdate) -> crate::Result<RepoRecord> {
-        self.inner.update_repo(id, update).await
+    async fn update_repo_with_events(
+        &self,
+        id: &RepoId,
+        update: RepoUpdate,
+        events: &[crate::EventDraft],
+    ) -> crate::Result<RepoRecord> {
+        self.inner.update_repo_with_events(id, update, events).await
     }
 
-    async fn delete_repo(&self, id: &RepoId) -> crate::Result<bool> {
-        self.inner.delete_repo(id).await
+    async fn delete_repo_with_events(
+        &self,
+        id: &RepoId,
+        events: &[crate::EventDraft],
+    ) -> crate::Result<bool> {
+        self.inner.delete_repo_with_events(id, events).await
     }
 
     async fn owner_usage(&self, owner: &UserId) -> crate::Result<crate::Usage> {

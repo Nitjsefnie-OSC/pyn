@@ -12,8 +12,8 @@ use pyn_core::branch::{DEFAULT_BRANCH, conflicts};
 use pyn_core::commit_record::{CommitDraft, TreeChange, TreeEdit, draft_commit};
 use pyn_core::merge::{MergeWrite, MergeWritten};
 use pyn_core::{
-    Branch, ChangesetItem, Commit, CommitFilter, FileMode, HeadCounts, HistoryCursor, HistoryScan,
-    Lock, MetadataStore, Mode, ObjectId, PathFilter, Person, PushedCommit, PynError,
+    Branch, ChangesetItem, Commit, CommitFilter, EventDraft, FileMode, HeadCounts, HistoryCursor,
+    HistoryScan, Lock, MetadataStore, Mode, ObjectId, PathFilter, Person, PushedCommit, PynError,
     REPO_ALGORITHM, RepoId, RepoPath, RepoRecord, RepoSettings, RepoUpdate, RepoUsage, Result,
     Revision, RevisionHash, RevisionId, StorageCap, UploadReservation, Usage, UserId, Visibility,
 };
@@ -1110,8 +1110,28 @@ impl MetadataStore for PgMetadataStore {
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(db)?;
+        let created = head.is_none();
+        if created {
+            let inserted = sqlx::query(
+                "INSERT INTO branches (repo, name, head, is_default, created_at, created_by)
+                 VALUES ($1, $2, NULL, false, $3, $4)",
+            )
+            .bind(repo.as_str())
+            .bind(branch)
+            .bind(now)
+            .bind(pusher.as_str())
+            .execute(&mut *tx)
+            .await;
+            match inserted {
+                Ok(_) => {}
+                Err(e) if is_unique_violation(&e) => {
+                    return Err(PynError::BranchExists(branch.to_string()));
+                }
+                Err(e) => return Err(db(e)),
+            }
+        }
         let head = head
-            .ok_or_else(|| PynError::BranchNotFound(branch.to_string()))?
+            .flatten()
             .map(|h| object_id(&h, "branch head"))
             .transpose()?;
         let mut tip = head;
@@ -1122,11 +1142,29 @@ impl MetadataStore for PgMetadataStore {
                     Some(p) => p == h || is_ancestor_in(&mut tx, repo, &p, &h).await?,
                     None => false,
                 },
+                (0, None) if created => match first {
+                    Some(p) => commit_known(&mut tx, repo, &p).await?,
+                    None => !sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS (SELECT 1 FROM commits WHERE repo = $1)",
+                    )
+                    .bind(repo.as_str())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(db)?,
+                },
                 (0, None) => first.is_none(),
                 _ => first == tip,
             };
             if !linked {
-                return Err(PynError::NotFastForward(branch.to_string()));
+                return Err(if created {
+                    PynError::PushInvalid(
+                        "the first commit of a new branch must be a child of a commit the repository has, \
+                         or the repository must be empty"
+                            .into(),
+                    )
+                } else {
+                    PynError::NotFastForward(branch.to_string())
+                });
             }
             for other in c.record.parents.iter().skip(1) {
                 if !commit_known(&mut tx, repo, other).await? {
@@ -2173,10 +2211,11 @@ impl MetadataStore for PgMetadataStore {
         })
     }
 
-    async fn create_repo_capped(
+    async fn create_repo_capped_with_events(
         &self,
         repo: RepoRecord,
         max_repos: Option<u64>,
+        events: &[EventDraft],
     ) -> Result<RepoRecord> {
         let mut tx = self.pool.begin().await.map_err(db)?;
         if let Some(limit) = max_repos {
@@ -2223,6 +2262,7 @@ impl MetadataStore for PgMetadataStore {
         match inserted {
             Ok(_) => {
                 ensure_default_branch(&mut tx, &repo.id, &repo.owner, repo.created_at).await?;
+                self.queue_events(&mut tx, events).await?;
                 tx.commit().await.map_err(db)?;
                 Ok(repo)
             }
@@ -2287,11 +2327,17 @@ impl MetadataStore for PgMetadataStore {
         rows.iter().map(repo_from).collect()
     }
 
-    async fn update_repo(&self, id: &RepoId, update: RepoUpdate) -> Result<RepoRecord> {
+    async fn update_repo_with_events(
+        &self,
+        id: &RepoId,
+        update: RepoUpdate,
+        events: &[EventDraft],
+    ) -> Result<RepoRecord> {
         let current = self
             .get_repo(id)
             .await?
             .ok_or_else(|| PynError::RepoNotFound(id.to_string()))?;
+        let mut tx = self.pool.begin().await.map_err(db)?;
         let updated = sqlx::query(
             "UPDATE repositories SET name = COALESCE($2, name), visibility = COALESCE($3, visibility),
                  lease_hours = COALESCE($4, lease_hours),
@@ -2305,10 +2351,14 @@ impl MetadataStore for PgMetadataStore {
         .bind(update.settings.map(|s| s.lease_hours as i32))
         .bind(update.settings.is_some())
         .bind(update.settings.and_then(|s| s.max_locks).map(|n| n as i32))
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await;
         match updated {
-            Ok(Some(row)) => repo_from(&row),
+            Ok(Some(row)) => {
+                self.queue_events(&mut tx, events).await?;
+                tx.commit().await.map_err(db)?;
+                repo_from(&row)
+            }
             Ok(None) => Err(PynError::RepoNotFound(id.to_string())),
             Err(e) if is_unique_violation(&e) => Err(PynError::RepoExists(format!(
                 "{}/{}",
@@ -2353,7 +2403,7 @@ impl MetadataStore for PgMetadataStore {
         })
     }
 
-    async fn delete_repo(&self, id: &RepoId) -> Result<bool> {
+    async fn delete_repo_with_events(&self, id: &RepoId, events: &[EventDraft]) -> Result<bool> {
         let mut tx = self.pool.begin().await.map_err(db)?;
         for stmt in [
             "DELETE FROM locks WHERE repo = $1",
@@ -2377,8 +2427,12 @@ impl MetadataStore for PgMetadataStore {
             .execute(&mut *tx)
             .await
             .map_err(db)?;
+        let removed = removed.rows_affected() > 0;
+        if removed {
+            self.queue_events(&mut tx, events).await?;
+        }
         tx.commit().await.map_err(db)?;
-        Ok(removed.rows_affected() > 0)
+        Ok(removed)
     }
 }
 

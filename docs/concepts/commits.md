@@ -103,7 +103,9 @@ is provisional.
 `<kind> <length>` header, and `id` is the SHA-256 git id it must hash to. Commits go oldest first; `trees` holds the trees the
 commits need that the server may not have. Blobs are not in the body: they are uploaded first through the chunked
 [object routes](storage.md), which is why a missing blob is `object_missing`. The caller is authenticated and authorized before the body is read, so a request without the permission is refused without its body being consumed. The body is at most 64 MiB (`object_too_large`, 413, beyond it); malformed JSON is `invalid_request`. The answer is
-`{branch, head, revisions, stranded?, released_locks?}`: the branch's head after the push, the revisions the commits made, in commit order, and, when a policy commit in the push stranded shared versions, the same `stranded` list a direct policy commit reports; `released_locks` lists the live locks (path, owner, expiry) such a policy commit released because their paths became shared.
+`{branch, head, created?, revisions, stranded?, released_locks?}`: the branch's head after the push, `created: true` (omitted otherwise) when the push made the branch, the revisions the commits made, in commit order, and, when a policy commit in the push stranded shared versions, the same `stranded` list a direct policy commit reports; `released_locks` lists the live locks (path, owner, expiry) such a policy commit released because their paths became shared.
+
+A `branch` the server does not have is created by the push, atomically with the commits: a refused push leaves no branch behind. It needs the same `checkin` permission as `POST .../branches`, a valid name (`invalid_branch_name`, 400) that does not clash with an existing branch (`branch_exists`, 409), and the first commit's parent must be a commit the repository has (`push_invalid` otherwise; `commit_not_found` for a parent that is not stored). On an empty repository the first commit may be a root commit. The new branch's policy is the one in force at that parent. Deleting a branch is the existing `DELETE .../branches/{branch}` route; `pyn push --delete <branch>` and `pyn push origin :<branch>` call it.
 
 The route is additive: `changesets` and `checkin` remain the direct route (decision #300), and no existing field changed.
 
@@ -112,7 +114,7 @@ The route is additive: `changesets` and `checkin` remain the direct route (decis
 Errors, as `{code, message}`: `not_fast_forward` (409), `lock_required` and `lock_held` (409), `stale_base` (409),
 `storage_limit_reached` (409), `push_invalid` (400, an id that does not hash, bytes that are not a git object, a missing tree, a merge of a commit the
 repository lacks, or a commit already stored), `merge_conflict` (409, a merge commit that leaves a diverged exclusive path unresolved), `object_missing` (400), `invalid_request` (400, an empty push or bad base64), `invalid_rules` (400, a policy file on the default branch that does not validate), `push_unsupported` (422), `push_too_large` (413, a commit changing more than 10000 files or a push more than 50000, see [limits](limits.md#request-size-bounds)),
-`branch_not_found` and `commit_not_found` (404), `forbidden` (403, also for a policy change without the `edit_policy` permission). No offline lock guarantee exists: a lock is judged when the
+`branch_exists` (409), `invalid_branch_name` (400), `commit_not_found` (404), `forbidden` (403, also for a policy change without the `edit_policy` permission). No offline lock guarantee exists: a lock is judged when the
 push arrives.
 
 A push is audited like the checkins it makes: one `checkin` entry per revision, with the authenticated pusher as the actor and
@@ -161,7 +163,7 @@ repository is readable without credentials). A client that keeps commits and tre
 - It must fast-forward: the first commit's parent is the branch's head or one of its ancestors (a first commit with no parent is
   for an empty branch), and the pushed history must contain the head, which only a [merge commit](#merge-commits-in-a-push-provisional)
   can arrange when the first parent is not the head; otherwise `not_fast_forward`. A commit already in the repository is
-  `push_invalid`. The branch must exist.
+  `push_invalid`. A branch that does not exist is created by the push.
 - Each commit's tree is compared with its parent's: every added or changed file becomes one revision, with the commit's author as its
   person, the pusher as its account, the commit's time and message, and the path's mode under the branch's policy (an unlisted path
   is exclusive by default). The blob of each must already be in the object store (`object_missing`), and a tree the commit needs must
@@ -231,10 +233,10 @@ In a workspace with local commits, the default ([workspace](workspace.md#the-loc
 (decision #300); in a workspace cloned with `--no-local-store` they are unchanged (`fetch` and `pull` run `pyn update`, `push`
 says there is nothing to push).
 
-- `pyn fetch` sends the remote-tracking tip as the only have and stores the commits and trees of each page. Every commit and
+- `pyn fetch` sends the remote-tracking tips as the haves and stores the commits and trees of each page, for every branch of the server. Every commit and
   tree body is hashed and must equal the id it came with, and a commit's tree and parents must already be stored: on any
   mismatch the whole answer is refused (`... does not match its content`) and the remote-tracking ref does not move. It then
-  moves `refs/remotes/origin/<branch>`; the local branch and the files are left alone. Output is git's:
+  moves `refs/remotes/origin/<branch>` of each branch; the local branches and the files are left alone. Output is git's:
   `From <server>/<repo>` and `   <old>..<new>  main -> origin/main`, nothing when there is nothing new. Pointers are not kept
   yet. A blob the store lacks is read on demand by id (`GET .../objects/{id}`), checked against the id and stored.
 - `pyn pull` is `fetch` and then: nothing when the local branch already holds the fetched tip (`Already up to date.`); a

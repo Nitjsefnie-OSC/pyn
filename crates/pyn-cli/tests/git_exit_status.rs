@@ -82,60 +82,12 @@ const DIVERGENT: &[(&str, &str)] = &[
         "docs: Branches, switching and the work tree, `restore` with no path is 129 not 128",
     ),
     (
-        "Dirty: config bad..key value",
-        "docs: Extras `git config`, pyn config has list/get/set only; other forms are 129",
-    ),
-    (
-        "Dirty: config -f /nonexistent/file --list",
-        "docs: Extras `git config`, pyn config has list/get/set only; other forms are 129",
-    ),
-    (
-        "Dirty: config --get nosuch.key",
-        "docs: Extras `git config`, pyn config has list/get/set only; other forms are 129",
-    ),
-    (
-        "Dirty: config nokey",
-        "docs: Extras `git config`, pyn config has list/get/set only; other forms are 129",
-    ),
-    (
-        "Dirty: config nosuch.key",
-        "docs: Extras `git config`, pyn config has list/get/set only; other forms are 129",
-    ),
-    (
         "Dirty: config --remove-section nosuchsection",
-        "docs: Extras `git config`, pyn config has list/get/set only; other forms are 129",
+        "docs: Extras `git config`, section edits (`--remove-section`, `--rename-section`) are not built (129)",
     ),
     (
         "Dirty: config --rename-section nosuchsection other",
-        "docs: Extras `git config`, pyn config has list/get/set only; other forms are 129",
-    ),
-    (
-        "Dirty: config --unset nosuch.key",
-        "docs: Extras `git config`, pyn config has list/get/set only; other forms are 129",
-    ),
-    (
-        "Outside: config --list --local",
-        "docs: Extras `git config`, pyn config has list/get/set only; other forms are 129",
-    ),
-    (
-        "Outside: config --local a.b c",
-        "docs: Extras `git config`, pyn config has list/get/set only; other forms are 129",
-    ),
-    (
-        "Outside: config --local a.b",
-        "docs: Extras `git config`, pyn config has list/get/set only; other forms are 129",
-    ),
-    (
-        "Dirty: config user.name",
-        "docs: Daily set `git config`, subcommands instead of flags (129)",
-    ),
-    (
-        "Dirty: config --list",
-        "docs: Daily set `git config`, subcommands instead of flags (129)",
-    ),
-    (
-        "Dirty: config a.b c",
-        "docs: Daily set `git config`, subcommands instead of flags (129)",
+        "docs: Extras `git config`, section edits (`--remove-section`, `--rename-section`) are not built (129)",
     ),
     (
         "Outside: diff",

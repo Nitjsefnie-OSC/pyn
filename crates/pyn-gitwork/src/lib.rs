@@ -9,6 +9,7 @@ mod filter;
 mod history;
 mod ignore;
 pub mod lfs;
+mod mailmap;
 mod pathspec;
 mod repo;
 mod rev;
@@ -25,6 +26,7 @@ pub use error::{Error, Result};
 pub use filter::{Driver, External, Filters, Op};
 pub use history::{Log, LogEntry, Walked};
 pub use ignore::{Ignore, Level, Rule, parse_rules, verdict};
+pub use mailmap::Mailmap;
 pub use pathspec::{
     MagicSet, Match, Pathspec, PathspecContext, PathspecError, PathspecOptions, Tracker,
     read_pathspec_file,

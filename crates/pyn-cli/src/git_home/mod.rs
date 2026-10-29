@@ -210,6 +210,7 @@ pub struct GitHome {
     repo: Repo,
     /// The work tree root with a `.pyn` folder beside `.git`, whether or not it exists yet.
     ws: Workspace,
+    ref_env: hooks::RefEnv,
 }
 
 /// A `.pyn` is a pyn server workspace once a clone has recorded which revision each file is at.
@@ -277,7 +278,7 @@ pub fn detect(start: &Path) -> Result<Option<GitHome>> {
         dir: root.join(workspace::DIR),
         root,
     };
-    Ok(Some(GitHome { repo, ws }))
+    Ok(Some(GitHome::new(repo, ws)))
 }
 
 fn unavailable(what: &str) -> anyhow::Error {
@@ -307,6 +308,18 @@ fn path_string(path: &[u8]) -> String {
 }
 
 impl GitHome {
+    fn new(repo: Repo, ws: Workspace) -> Self {
+        let mut git = Self {
+            repo,
+            ws,
+            ref_env: hooks::RefEnv::default(),
+        };
+        if let Some(hook) = hooks::RefHook::new(&git) {
+            git.repo.observe_refs(std::sync::Arc::new(hook));
+        }
+        git
+    }
+
     /// Opens the repository whose work tree root, or bare git directory, is `path`.
     pub(super) fn open_at(path: &Path) -> Result<GitHome> {
         let (home, xdg) = user_dirs();
@@ -319,7 +332,7 @@ impl GitHome {
             dir: root.join(workspace::DIR),
             root,
         };
-        Ok(GitHome { repo, ws })
+        Ok(GitHome::new(repo, ws))
     }
 
     pub fn is_bare(&self) -> bool {

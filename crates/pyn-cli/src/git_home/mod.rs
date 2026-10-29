@@ -463,6 +463,10 @@ impl Backend for GitHome {
         self.repo.config().get(key).map(str::to_string)
     }
 
+    fn abbreviations(&self, explicit: Option<usize>) -> Result<Option<pyn_gitwork::Abbreviations>> {
+        Ok(Some(self.repo.abbreviations(explicit)?))
+    }
+
     fn whoami(&self) -> Result<String> {
         self.repo
             .config()

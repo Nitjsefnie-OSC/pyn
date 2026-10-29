@@ -870,6 +870,17 @@ fn decorated_log_and_from_labels_match_git_at_nondefault_widths() {
             let id = head.split_whitespace().nth(1).unwrap();
             assert_eq!(id.len(), full, "{head}");
 
+            // Upstream's `--abbrev-commit` header joined with the width.
+            let mut abbrev_commit_args = vec!["log", "-n", "1", "--abbrev-commit"];
+            if !flag.is_empty() {
+                abbrev_commit_args.push(flag);
+            }
+            let out = same(&repo, &abbrev_commit_args);
+            let head = out.lines().next().unwrap();
+            assert!(head.starts_with("commit "), "{head}");
+            let id = head.split_whitespace().nth(1).unwrap();
+            assert_eq!(id.len(), width, "{head}");
+
             let mut oneline_args = vec!["log", "-n", "2", "--oneline", "--decorate=short"];
             if !flag.is_empty() {
                 oneline_args.push(flag);

@@ -53,7 +53,7 @@ pub(super) fn of_change(
 ) -> Result<Rendered> {
     let abbrev = |entry: Option<&Entry>| {
         entry.map_or_else(
-            || "0".repeat(abbreviations.minimum_len()),
+            || abbreviations.short_null(),
             |e| abbreviations.short(&e.id),
         )
     };

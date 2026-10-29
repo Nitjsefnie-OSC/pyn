@@ -584,11 +584,7 @@ impl Opts {
     /// These options with the widths `--abbrev` and `--no-abbrev` ask for.
     pub fn with_abbrev(self, flags: &crate::commit_format::AbbrevArgs) -> Self {
         Self {
-            abbrev: if flags.no_abbrev() {
-                None
-            } else {
-                flags.abbreviation()
-            },
+            abbrev: flags.patch_abbreviation(),
             no_abbrev: flags.no_abbrev(),
             ..self
         }

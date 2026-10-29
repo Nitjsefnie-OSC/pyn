@@ -308,7 +308,7 @@ fn patch(
     p: &Pair,
     c: &Contents,
     format: &Format,
-    abbreviations: Option<&pyn_gitwork::Abbreviations>,
+    abbreviations: &crate::commit_format::IdFormat,
     (style, words): (Option<&Style>, Option<&word_diff::Setup>),
 ) -> String {
     let (old, new) = (p.old.as_ref(), p.new.as_ref());
@@ -363,7 +363,7 @@ fn patch(
     if changed {
         // A git home lengthens ids until unique; `--full-index` and other homes keep `Opts`' widths.
         let shorten = |h: &str| match abbreviations {
-            Some(a) if !o.full_index => a.short_hex(h),
+            crate::commit_format::IdFormat::Git(a) if !o.full_index => a.short_hex(h),
             _ => o.index_id(h),
         };
         let (x, y) = (id_of(old, new, shorten), id_of(new, old, shorten));
@@ -892,7 +892,7 @@ pub(crate) fn emit(
     }
     let mut body = String::new();
     let abbreviations = backend.abbreviations(format.opts.abbrev)?;
-    let differs = render(backend, list, format, abbreviations.as_ref(), &mut body)?;
+    let differs = render(backend, list, format, &abbreviations, &mut body)?;
     let start = out.len();
     if format.kind == Kind::Patch {
         out.push_str(&summary);
@@ -912,13 +912,7 @@ pub(crate) fn emit(
             ..format.clone()
         };
         let mut patch = String::new();
-        render(
-            backend,
-            list,
-            &patch_format,
-            abbreviations.as_ref(),
-            &mut patch,
-        )?;
+        render(backend, list, &patch_format, &abbreviations, &mut patch)?;
         // The blank line before the patch is left out after a dirstat by changes or files.
         let by_line = format
             .opts
@@ -1036,7 +1030,7 @@ fn render(
     backend: &dyn Backend,
     list: &[Pair],
     format: &Format,
-    abbreviations: Option<&pyn_gitwork::Abbreviations>,
+    abbreviations: &crate::commit_format::IdFormat,
     out: &mut String,
 ) -> Result<bool> {
     let style = Style::resolve(&format.opts, &|k| backend.diff_setting(k));

@@ -14,6 +14,21 @@ use crate::time;
 /// The server renderer retains its existing abbreviation width.
 const ABBREV: usize = 7;
 
+/// Object-id rendering conventions selected by the repository's home.
+pub enum IdFormat {
+    Server,
+    Git(pyn_gitwork::Abbreviations),
+}
+
+impl IdFormat {
+    pub fn short(&self, id: &ObjectId) -> String {
+        match self {
+            Self::Server => id.to_hex()[..ABBREV].to_string(),
+            Self::Git(a) => a.short(id),
+        }
+    }
+}
+
 /// `--abbrev[=<n>]` and `--no-abbrev`, which `log`, `show`, `diff` and `stash show` share.
 #[derive(clap::Args, Debug, Default, Clone)]
 pub struct AbbrevArgs {
@@ -267,7 +282,7 @@ pub fn render_api(r: &Rendering, c: &api::Commit) -> Result<String> {
         abbrev_commit: r.abbrev_commit,
         mailmap: None,
         map_headers: false,
-        abbreviations: None,
+        abbreviations: &IdFormat::Server,
     };
     Ok(format!(
         "{}{}",
@@ -479,7 +494,7 @@ pub struct Context<'a> {
     pub mailmap: Option<&'a Mailmap>,
     /// Whether the `Author:` and `Commit:` lines print mapped identities.
     pub map_headers: bool,
-    pub abbreviations: Option<&'a pyn_gitwork::Abbreviations>,
+    pub abbreviations: &'a IdFormat,
 }
 
 impl Context<'_> {
@@ -496,9 +511,9 @@ impl Context<'_> {
     }
 }
 
-/// The id form every git-home rendering shares; `None` is the server's fixed seven digits.
-pub(crate) fn short(abbreviations: Option<&pyn_gitwork::Abbreviations>, id: &ObjectId) -> String {
-    abbreviations.map_or_else(|| id.to_hex()[..ABBREV].to_string(), |a| a.short(id))
+/// The id form every git-home rendering shares; the server's is `IdFormat::Server`.
+pub(crate) fn short(abbreviations: &IdFormat, id: &ObjectId) -> String {
+    abbreviations.short(id)
 }
 
 fn lossy(bytes: &[u8]) -> String {

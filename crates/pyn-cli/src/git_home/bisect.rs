@@ -1089,7 +1089,7 @@ impl<'a> Bisect<'a> {
                 abbrev_commit: false,
                 mailmap: None,
                 map_headers: false,
-                abbreviations: None,
+                abbreviations: &crate::commit_format::IdFormat::Server,
             };
             let mut out = render(&pretty, &ctx, id, &c);
             out.push_str(pretty.terminator());

@@ -27,7 +27,7 @@ const EXCLUDE_LINE: &str = ".pyn/";
 
 /// Runs `command` on a git repository, or refuses it with the home that provides it.
 pub fn run(command: Command, git: &GitHome, cwd: &Path) -> Result<()> {
-    // Validate before writes; renderers still build fresh contexts after object changes.
+    // Validate before writes; this repository caches the configured/default length.
     git.repo.abbreviation_len(None)?;
     let server_only = |feature: &str| -> Result<()> {
         match git.pyn_server(feature) {
@@ -1165,11 +1165,12 @@ fn show(
     let names = decorate.names(git, pretty.uses_decorations())?;
     let mailmap = git.mailmap()?;
     // `--no-abbrev` shows whole commit ids; the patch keeps `format.opts.abbrev`.
-    let abbreviations = git.repo.abbreviations(if format.opts.no_abbrev {
+    let width = if format.opts.no_abbrev {
         Some(usize::MAX)
     } else {
         format.opts.abbrev
-    })?;
+    };
+    let abbreviations = crate::commit_format::IdFormat::Git(git.repo.abbreviations(width)?);
     let ctx = Context {
         style,
         now: chrono::Utc::now().timestamp(),
@@ -1179,7 +1180,7 @@ fn show(
         abbrev_commit,
         mailmap: Some(&mailmap),
         map_headers: fmt.mapped_headers(git.repo.bool_setting("log.mailmap", true)),
-        abbreviations: Some(&abbreviations),
+        abbreviations: &abbreviations,
     };
     let shape = Shape {
         git,
@@ -1273,12 +1274,7 @@ fn show(
                 Some(r) => super::verify_sig::with_report(text, r),
                 None => text,
             };
-            out.push_str(&with_from(
-                text,
-                &pretty,
-                seg.from.as_ref(),
-                Some(&abbreviations),
-            ));
+            out.push_str(&with_from(text, &pretty, seg.from.as_ref(), &abbreviations));
             out.push_str(pretty.terminator());
             out.push_str(&seg.tail);
         }

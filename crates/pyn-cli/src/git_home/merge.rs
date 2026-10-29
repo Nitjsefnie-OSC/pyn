@@ -292,7 +292,7 @@ fn start(git: &GitHome, mut args: MergeArgs) -> Result<()> {
 /// `SQUASH_MSG`: the commits `theirs` brings in, newest first, as `log` prints them.
 fn squash_message(git: &GitHome, ours: &ObjectId, theirs: &ObjectId) -> Result<String> {
     let mut text = String::from("Squashed commit of the following:\n");
-    let abbreviations = git.repo.abbreviations(None)?;
+    let abbreviations = crate::commit_format::IdFormat::Git(git.repo.abbreviations(None)?);
     let ctx = Context {
         style: DateStyle::Default,
         now: 0,
@@ -302,7 +302,7 @@ fn squash_message(git: &GitHome, ours: &ObjectId, theirs: &ObjectId) -> Result<S
         abbrev_commit: false,
         mailmap: None,
         map_headers: false,
-        abbreviations: Some(&abbreviations),
+        abbreviations: &abbreviations,
     };
     let mut walk = git
         .repo

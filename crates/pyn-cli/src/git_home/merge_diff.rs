@@ -409,7 +409,7 @@ pub(super) fn with_from(
     mut text: String,
     pretty: &Pretty,
     from: Option<&ObjectId>,
-    abbreviations: Option<&pyn_gitwork::Abbreviations>,
+    abbreviations: &crate::commit_format::IdFormat,
 ) -> String {
     let Some(p) = from else { return text };
     let (skip, short_id) = match pretty {

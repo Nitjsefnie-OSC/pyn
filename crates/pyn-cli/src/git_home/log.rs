@@ -634,7 +634,8 @@ pub(super) fn log(
     let commit_color = diff::commit_color(git, &parts.opts, decorate.on(), args.graph);
     let spec = git.pathspec(cwd, &selection.paths, false)?;
     let decorated = decorate.names(git, pretty.uses_decorations())?;
-    let abbreviations = git.repo.abbreviations(args.abbrev.abbreviation())?;
+    let abbreviations =
+        crate::commit_format::IdFormat::Git(git.repo.abbreviations(args.abbrev.abbreviation())?);
     let ctx = Context {
         style,
         now: chrono::Utc::now().timestamp(),
@@ -644,7 +645,7 @@ pub(super) fn log(
         abbrev_commit,
         mailmap: Some(&mailmap),
         map_headers,
-        abbreviations: Some(&abbreviations),
+        abbreviations: &abbreviations,
     };
 
     if plan.needs_full_history() && !selection.paths.is_empty() {
@@ -677,7 +678,7 @@ pub(super) fn log(
         git,
         pretty: &pretty,
         ctx: &ctx,
-        abbreviations: Some(&abbreviations),
+        abbreviations: &abbreviations,
         spec: &spec,
         parts: &parts,
         patch_parts: &patch_parts,
@@ -761,7 +762,7 @@ struct Printer<'a> {
     git: &'a GitHome,
     pretty: &'a Pretty,
     ctx: &'a Context<'a>,
-    abbreviations: Option<&'a pyn_gitwork::Abbreviations>,
+    abbreviations: &'a crate::commit_format::IdFormat,
     spec: &'a Pathspec,
     parts: &'a DiffParts,
     patch_parts: &'a DiffParts,

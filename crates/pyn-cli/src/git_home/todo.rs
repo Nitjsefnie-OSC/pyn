@@ -56,7 +56,7 @@ impl Commits for GitHome {
             abbrev_commit: false,
             mailmap: Some(&mailmap),
             map_headers: false,
-            abbreviations: Some(&abbreviations),
+            abbreviations: &crate::commit_format::IdFormat::Git(abbreviations),
         };
         let text = render(&pretty, &ctx, id, &self.repo.commit(id)?);
         Ok(text.replace('\n', " "))

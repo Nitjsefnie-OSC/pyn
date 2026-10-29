@@ -174,9 +174,7 @@ pub(crate) use stage::clean_message;
 pub use stash::StashArgs;
 pub use submodule::SubmoduleArgs;
 pub use tags::TagArgs;
-pub(crate) use tags::{
-    annotation, check_name, delete as delete_tags, list as list_tags, short, tag_ref,
-};
+pub(crate) use tags::{annotation, check_name, delete as delete_tags, list as list_tags, tag_ref};
 pub use to_git::{ConvertArgs, Home, to_git};
 pub use to_pyn::to_pyn;
 pub use verify_sig::{VerifyCommitArgs, VerifyTagArgs};
@@ -463,8 +461,10 @@ impl Backend for GitHome {
         self.repo.config().get(key).map(str::to_string)
     }
 
-    fn abbreviations(&self, explicit: Option<usize>) -> Result<Option<pyn_gitwork::Abbreviations>> {
-        Ok(Some(self.repo.abbreviations(explicit)?))
+    fn abbreviations(&self, explicit: Option<usize>) -> Result<crate::commit_format::IdFormat> {
+        Ok(crate::commit_format::IdFormat::Git(
+            self.repo.abbreviations(explicit)?,
+        ))
     }
 
     fn whoami(&self) -> Result<String> {
